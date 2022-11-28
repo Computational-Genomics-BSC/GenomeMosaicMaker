@@ -62,6 +62,7 @@ def _read_vcf(vcf_file, padding):
         for idx, file in enumerate(files):
             if file not in input_files:
                 input_files[file] = (idx, pysam.AlignmentFile(file))
+                # input_files[file] = (idx, None)
 
         # Add the zone
         start_chrom = row['start_chrom']
@@ -72,15 +73,20 @@ def _read_vcf(vcf_file, padding):
             zones[end_chrom] = []
         var_type = row['type_inferred']
         if var_type == 'SNV':
-            bisect.insort(zones[start_chrom], (row['start'] - padding, row['start'] + padding, files))
+            bisect.insort(zones[start_chrom], (row['start'] - padding, row['start'] + padding, files, str(var_obj)))
         elif var_type == 'INS':
-            bisect.insort(zones[start_chrom], (row['start'] - padding, row['start'] + row['length'] + padding, files))
+            bisect.insort(zones[start_chrom], (row['start'] - padding, row['start'] + row['length'] + padding, files, str(var_obj)))
         elif var_type == 'TRN':
-            bisect.insort(zones[start_chrom], (row['start'] - padding, row['start'] + padding, files))
-            bisect.insort(zones[end_chrom], (row['end'] - padding, row['end'] + padding, files))
+            bisect.insort(zones[start_chrom], (row['start'] - padding, row['start'] + padding, files, str(var_obj)))
+            bisect.insort(zones[end_chrom], (row['end'] - padding, row['end'] + padding, files, str(var_obj)))
+        elif var_type == 'INV':
+            if row['start'] + padding > row['end'] - padding:
+                bisect.insort(zones[start_chrom], (row['start'] - padding, row['end'] + padding, files, str(var_obj)))
+            else:
+                bisect.insort(zones[start_chrom], (row['start'] - padding, row['start'] + padding, files, str(var_obj)))
+                bisect.insort(zones[end_chrom], (row['end'] - padding, row['end'] + padding, files, str(var_obj)))
         else:
-            bisect.insort(zones[start_chrom], (row['start'] - padding, row['end'] + padding, files))
-
+            bisect.insort(zones[start_chrom], (row['start'] - padding, row['end'] + padding, files, str(var_obj)))
     return input_files, zones
 
 
@@ -98,6 +104,9 @@ if __name__ == '__main__':
 
     input_files, zones = _read_vcf(args.input, args.padding)
 
+    print(f'Loaded {len(input_files)} input files')
+
+    end_analysis = False
     # Check for overlapping zones
     for chrom, chrom_zones in zones.items():
         for i in range(1, len(chrom_zones)):
@@ -111,7 +120,13 @@ if __name__ == '__main__':
                 answer = input()
                 if answer != 'y':
                     sys.exit(1)
-
+                else:
+                    end_analysis = True
+                    break
+        if end_analysis:
+            break
+    
+    print('Successfully checked for overlapping zones')
     # Create the output files
     output_files = []
     for idx, output_file in enumerate(args.outputs):
@@ -121,7 +136,7 @@ if __name__ == '__main__':
     # Go through the zones and write the reads
     for chrom, chrom_zones in zones.items():
         for zone in chrom_zones:
-            start, end, files = zone
+            start, end, files = zone[:3]
             for file in files:
                 file_idx, file_obj = input_files[file]
                 for read in _get_reads(file_obj, chrom, start, end):
