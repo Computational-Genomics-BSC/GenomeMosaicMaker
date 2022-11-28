@@ -16,6 +16,7 @@ sys.path.insert(0, VARIANT_EXTRACTOR_DIR)
 
 from variant_extractor import VariantExtractor  # noqa
 
+RG_NAME = 'COMBINED'
 
 def _get_reads(file_obj, chrom, start, end):
     for read in file_obj.fetch(chrom, start, end):
@@ -29,7 +30,7 @@ def _get_reads(file_obj, chrom, start, end):
         yield read
 
 
-def _open_output_file(output_file, template_file):
+def _open_output_file(output_file, file_index, template_file):
     # Get write mode based on the output file extension
     if output_file.endswith('.bam'):
         write_mode = 'wb'
@@ -40,8 +41,16 @@ def _open_output_file(output_file, template_file):
     else:
         raise Exception('Invalid output file extension')
 
+    # Get the header from the template file
+    header = template_file.header
+    new_header = header.to_dict()
+    # Remove the PG and RG lines
+    new_header['PG'] = []
+    new_header['RG'] = [{'ID': RG_NAME, 'SM': str(file_index)}]
+
     # Open the output file
-    return pysam.AlignmentFile(output_file, write_mode, template=template_file)
+    return pysam.AlignmentFile(output_file, write_mode, header=new_header)
+
 
 
 def _read_vcf(vcf_file, padding):
@@ -130,7 +139,7 @@ if __name__ == '__main__':
     # Create the output files
     output_files = []
     for idx, output_file in enumerate(args.outputs):
-        output_files.append(_open_output_file(output_file, input_files[list(input_files.keys())[0]][1]))
+        output_files.append(_open_output_file(output_file, idx, input_files[list(input_files.keys())[0]][1]))
 
     pending_unmapped_reads = dict()
     # Go through the zones and write the reads
@@ -147,6 +156,7 @@ if __name__ == '__main__':
                             pending_unmapped_reads[read.query_name] = (read, file)
                     # Hash read name and file name to get an unique read name
                     read.query_name = hashlib.md5((f'{read.query_name}_{file}').encode()).hexdigest()
+                    read.set_tag('RG', RG_NAME)
                     output_files[file_idx].write(read)
 
     # Write the missing unmapped reads
@@ -156,6 +166,7 @@ if __name__ == '__main__':
             if read.is_unmapped and not read.is_duplicate and not read.is_secondary \
                     and not read.is_supplementary and read.query_name == query_name:
                 read.query_name = hashlib.md5((f'{read.query_name}_{file}').encode()).hexdigest()
+                read.set_tag('RG', RG_NAME)
                 output_files[file_idx].write(read)
                 break
 
