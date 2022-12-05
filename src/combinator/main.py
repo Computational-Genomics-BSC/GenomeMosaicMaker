@@ -8,6 +8,8 @@ import argparse
 import pysam
 import bisect
 import hashlib
+import threading, queue
+from concurrent.futures import ThreadPoolExecutor
 
 # Add variant_extractor to PYTHONPATH
 VARIANT_EXTRACTOR_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__),
@@ -18,16 +20,49 @@ from variant_extractor import VariantExtractor  # noqa
 
 RG_NAME = 'COMBINED'
 
-def _get_reads(file_obj, chrom, start, end):
-    for read in file_obj.fetch(chrom, start, end):
-        read_end = read.reference_start + read.query_length
-        pair_end = read.next_reference_start + read.query_length
-        if read.is_duplicate or read.is_secondary or read.is_supplementary or \
-                read.next_reference_name != chrom or \
-                pair_end > end or read.next_reference_start < start or \
-                read_end > end or read.reference_start < start:
-            continue
-        yield read
+
+def writer():
+    # Call to_write.get() until it returns None
+    for f, read in iter(to_write.get, None):
+        f.write(read)
+
+to_write = queue.Queue(maxsize=100000)
+threading.Thread(target=writer).start()
+
+def _is_valid_read(read):
+    return not read.is_secondary and not read.is_supplementary
+
+
+def _find_mate(read, original_query_name, file_obj):
+    for mate_read in file_obj.fetch(read.next_reference_name, read.next_reference_start, read.next_reference_start + 1):
+        if mate_read.query_name == original_query_name \
+                and mate_read.is_read1 != read.is_read1 \
+                and _is_valid_read(mate_read):
+            return mate_read
+    raise Exception(f'Mate not found for read {original_query_name} ({read.query_name}) in file {file_obj.filename}')
+
+def _write_mates_from_file_read(mates_info):
+    for info in mates_info:
+        read, original_query_name, input_file_obj, output_file_obj = info
+        mate = _find_mate(read, original_query_name, input_file_obj)
+        mate.query_name = read.query_name
+        mate.set_tag('RG', RG_NAME)
+        to_write.put((output_file_obj, mate))
+
+def _flush_pending_mates(pending_mates):
+    # Group pending mates by input file
+    mates_by_file = dict()
+    for mate in pending_mates.values():
+        file = mate[2]
+        if file not in mates_by_file:
+            mates_by_file[file] = []
+        mates_by_file[file].append(mate)
+    pending_mates.clear()
+
+    pool = ThreadPoolExecutor()
+    for _ in pool.map(_write_mates_from_file_read, mates_by_file.values()):
+        pass
+    pool.shutdown()
 
 
 def _open_output_file(output_file, file_index, template_file):
@@ -50,7 +85,6 @@ def _open_output_file(output_file, file_index, template_file):
 
     # Open the output file
     return pysam.AlignmentFile(output_file, write_mode, header=new_header)
-
 
 
 def _read_vcf(vcf_file, padding):
@@ -84,7 +118,8 @@ def _read_vcf(vcf_file, padding):
         if var_type == 'SNV':
             bisect.insort(zones[start_chrom], (row['start'] - padding, row['start'] + padding, files, str(var_obj)))
         elif var_type == 'INS':
-            bisect.insort(zones[start_chrom], (row['start'] - padding, row['start'] + row['length'] + padding, files, str(var_obj)))
+            bisect.insort(zones[start_chrom], (row['start'] - padding, row['start'] +
+                          row['length'] + padding, files, str(var_obj)))
         elif var_type == 'TRN':
             bisect.insort(zones[start_chrom], (row['start'] - padding, row['start'] + padding, files, str(var_obj)))
             bisect.insort(zones[end_chrom], (row['end'] - padding, row['end'] + padding, files, str(var_obj)))
@@ -134,42 +169,43 @@ if __name__ == '__main__':
                     break
         if end_analysis:
             break
-    
+
     print('Successfully checked for overlapping zones')
     # Create the output files
     output_files = []
     for idx, output_file in enumerate(args.outputs):
         output_files.append(_open_output_file(output_file, idx, input_files[list(input_files.keys())[0]][1]))
 
-    pending_unmapped_reads = dict()
+    pending_mates = dict()
     # Go through the zones and write the reads
     for chrom, chrom_zones in zones.items():
         for zone in chrom_zones:
             start, end, files = zone[:3]
-            for file in files:
-                file_idx, file_obj = input_files[file]
-                for read in _get_reads(file_obj, chrom, start, end):
-                    if read.mate_is_unmapped or read.is_unmapped:
-                        # Check if the read is already in the pending reads
-                        pending_mate = pending_unmapped_reads.pop(read.query_name, None)
-                        if pending_mate is not None:
-                            pending_unmapped_reads[read.query_name] = (read, file)
+            for filename in files:
+                file_idx, input_file_obj = input_files[filename]
+                output_file_obj = output_files[file_idx]
+                for read in input_file_obj.fetch(chrom, start, end):
+                    if not _is_valid_read(read):
+                        continue
+                    new_query_name = hashlib.md5((f'{read.query_name}_{filename}').encode()).hexdigest()
+                    # Check if the read is already in the pending reads
+                    pending_mate = pending_mates.pop(new_query_name, None)
+                    if pending_mate is None:
+                        pending_mates[new_query_name] = (read, read.query_name, input_file_obj, output_file_obj)
                     # Hash read name and file name to get an unique read name
-                    read.query_name = hashlib.md5((f'{read.query_name}_{file}').encode()).hexdigest()
+                    read.query_name = new_query_name
                     read.set_tag('RG', RG_NAME)
-                    output_files[file_idx].write(read)
+                    to_write.put((output_file_obj, read))
 
-    # Write the missing unmapped reads
-    for query_name, (mate_read, file) in pending_unmapped_reads.items():
-        file_idx, file_obj = input_files[file]
-        for read in file_obj.fetch(mate_read.next_reference_name, mate_read.next_reference_start):
-            if read.is_unmapped and not read.is_duplicate and not read.is_secondary \
-                    and not read.is_supplementary and read.query_name == query_name:
-                read.query_name = hashlib.md5((f'{read.query_name}_{file}').encode()).hexdigest()
-                read.set_tag('RG', RG_NAME)
-                output_files[file_idx].write(read)
-                break
+    print(f'Flushing {len(pending_mates)} pending reads')
+    # Write the missing mates
+    _flush_pending_mates(pending_mates)
+
+    # enqueue None to instruct the writer thread to exit
+    to_write.put(None)
 
     # Close the output files
     for output_file in output_files:
         output_file.close()
+
+    print('Done')
