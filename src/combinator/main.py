@@ -8,7 +8,8 @@ import argparse
 import pysam
 import bisect
 import hashlib
-import threading, queue
+import threading
+import queue
 from concurrent.futures import ThreadPoolExecutor
 
 # Add variant_extractor to PYTHONPATH
@@ -26,8 +27,10 @@ def writer():
     for f, read in iter(to_write.get, None):
         f.write(read)
 
+
 to_write = queue.Queue(maxsize=100000)
 threading.Thread(target=writer).start()
+
 
 def _is_valid_read(read):
     return not read.is_secondary and not read.is_supplementary
@@ -41,28 +44,41 @@ def _find_mate(read, original_query_name, file_obj):
             return mate_read
     raise Exception(f'Mate not found for read {original_query_name} ({read.query_name}) in file {file_obj.filename}')
 
-def _write_mates_from_file_read(mates_info):
-    for info in mates_info:
-        read, original_query_name, input_file_obj, output_file_obj = info
+
+def _flush_pending_mates(pending_mates_list, input_file_obj, output_file_obj):
+    while len(pending_mates_list) > 0:
+        info = pending_mates_list.pop()
+        read, original_query_name = info[:2]
         mate = _find_mate(read, original_query_name, input_file_obj)
         mate.query_name = read.query_name
         mate.set_tag('RG', RG_NAME)
         to_write.put((output_file_obj, mate))
 
-def _flush_pending_mates(pending_mates):
-    # Group pending mates by input file
-    mates_by_file = dict()
-    for mate in pending_mates.values():
-        file = mate[2]
-        if file not in mates_by_file:
-            mates_by_file[file] = []
-        mates_by_file[file].append(mate)
-    pending_mates.clear()
 
-    pool = ThreadPoolExecutor()
-    for _ in pool.map(_write_mates_from_file_read, mates_by_file.values()):
-        pass
-    pool.shutdown()
+def _write_zones(zones, filename, input_file_obj, output_file_obj):
+    pending_mates = dict()
+    # Go through the zones and write the reads
+    for zone in zones:
+        chrom, start, end = zone[:3]
+        for read in input_file_obj.fetch(chrom, start, end):
+            if not _is_valid_read(read):
+                continue
+            new_query_name = hashlib.md5((f'{read.query_name}_{filename}').encode()).hexdigest()
+            # Check if the read is already in the pending reads
+            pending_mate = pending_mates.pop(new_query_name, None)
+            if pending_mate is None:
+                pending_mates[new_query_name] = (read, read.query_name)
+            # Hash read name and file name to get an unique read name
+            read.query_name = new_query_name
+            read.set_tag('RG', RG_NAME)
+            to_write.put((output_file_obj, read))
+
+    print(f'Flushing {len(pending_mates)} pending reads')
+
+    pending_mates_list = list(pending_mates.values())
+    del pending_mates
+    # Write the missing mates
+    _flush_pending_mates(pending_mates_list, input_file_obj, output_file_obj)
 
 
 def _open_output_file(output_file, file_index, template_file):
@@ -139,6 +155,7 @@ if __name__ == '__main__':
     parser.add_argument('--input', '-i', required=True, help='Input VCF file')
     parser.add_argument('--outputs', '-o', required=True, nargs='+', help='Output alignment files')
     parser.add_argument('--padding', '-p', type=int, default=1000, help='Padding around the variants')
+    parser.add_argument('--threads', '-t', type=int, default=1, help='Number of threads to use')
 
     args = parser.parse_args()
 
@@ -176,30 +193,26 @@ if __name__ == '__main__':
     for idx, output_file in enumerate(args.outputs):
         output_files.append(_open_output_file(output_file, idx, input_files[list(input_files.keys())[0]][1]))
 
-    pending_mates = dict()
-    # Go through the zones and write the reads
+    # Group zones by input file
+    zones_by_file = dict()
     for chrom, chrom_zones in zones.items():
         for zone in chrom_zones:
-            start, end, files = zone[:3]
-            for filename in files:
-                file_idx, input_file_obj = input_files[filename]
-                output_file_obj = output_files[file_idx]
-                for read in input_file_obj.fetch(chrom, start, end):
-                    if not _is_valid_read(read):
-                        continue
-                    new_query_name = hashlib.md5((f'{read.query_name}_{filename}').encode()).hexdigest()
-                    # Check if the read is already in the pending reads
-                    pending_mate = pending_mates.pop(new_query_name, None)
-                    if pending_mate is None:
-                        pending_mates[new_query_name] = (read, read.query_name, input_file_obj, output_file_obj)
-                    # Hash read name and file name to get an unique read name
-                    read.query_name = new_query_name
-                    read.set_tag('RG', RG_NAME)
-                    to_write.put((output_file_obj, read))
+            for file in zone[2]:
+                if file not in zones_by_file:
+                    zones_by_file[file] = []
+                zones_by_file[file].append((chrom, zone[0], zone[1]))
+    del zones
 
-    print(f'Flushing {len(pending_mates)} pending reads')
-    # Write the missing mates
-    _flush_pending_mates(pending_mates)
+    pool = ThreadPoolExecutor(args.threads)
+    tasks = []
+    for file, zones in zones_by_file.items():
+        file_idx, input_file_obj = input_files[file]
+        output_file_obj = output_files[file_idx]
+        task = pool.submit(_write_zones, zones, file, input_file_obj, output_file_obj)
+        tasks.append(task)
+    for task in tasks:
+        task.result()
+    pool.shutdown()
 
     # enqueue None to instruct the writer thread to exit
     to_write.put(None)
