@@ -8,9 +8,8 @@ import argparse
 import pysam
 import bisect
 import hashlib
-import threading
-import queue
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ProcessPoolExecutor
+import logging
 
 # Add variant_extractor to PYTHONPATH
 VARIANT_EXTRACTOR_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__),
@@ -22,66 +21,67 @@ from variant_extractor import VariantExtractor  # noqa
 RG_NAME = 'COMBINED'
 
 
-def writer():
-    # Call to_write.get() until it returns None
-    for f, read in iter(to_write.get, None):
-        f.write(read)
+def _write_read(output_file_obj, read, input_filename):
+    new_query_name = hashlib.md5((f'{read.query_name}_{input_filename}').encode()).hexdigest()
+    read.query_name = new_query_name
+    read.set_tag('RG', RG_NAME)
+    output_file_obj.write(read)
 
 
-to_write = queue.Queue(maxsize=100000)
-threading.Thread(target=writer).start()
-
-
-def _is_valid_read(read):
-    return not read.is_secondary and not read.is_supplementary
+def _write_reads_in_zones(zones, input_filename, input_file_obj, output_file_obj):
+    pending_mates = dict()
+    for chrom, chrom_zones in zones.items():
+        for zone in chrom_zones:
+            for read in input_file_obj.fetch(chrom, zone[0], zone[1]):
+                if read.is_secondary or read.is_supplementary:
+                    continue
+                mate_read = pending_mates.pop(read.query_name, None)
+                if mate_read is None:
+                    pending_mates[read.query_name] = (read, read.query_name)
+                _write_read(output_file_obj, read, input_filename)
+    return pending_mates
 
 
 def _find_mate(read, original_query_name, file_obj):
     for mate_read in file_obj.fetch(read.next_reference_name, read.next_reference_start, read.next_reference_start + 1):
         if mate_read.query_name == original_query_name \
                 and mate_read.is_read1 != read.is_read1 \
-                and _is_valid_read(mate_read):
+                and not read.is_secondary and not read.is_supplementary:
             return mate_read
     raise Exception(f'Mate not found for read {original_query_name} ({read.query_name}) in file {file_obj.filename}')
 
 
-def _flush_pending_mates(pending_mates_list, input_file_obj, output_file_obj):
-    while len(pending_mates_list) > 0:
-        info = pending_mates_list.pop()
-        read, original_query_name = info[:2]
-        mate = _find_mate(read, original_query_name, input_file_obj)
-        mate.query_name = read.query_name
-        mate.set_tag('RG', RG_NAME)
-        to_write.put((output_file_obj, mate))
+def _write_pending_mates(pending_mates, input_file_obj, output_file_obj):
+    for mate_read, original_query_name in pending_mates.values():
+        read = _find_mate(mate_read, original_query_name, input_file_obj)
+        _write_read(output_file_obj, read, input_file_obj.filename)
 
 
-def _write_zones(zones, filename, input_file_obj, output_file_obj):
-    pending_mates = dict()
-    # Go through the zones and write the reads
-    for zone in zones:
-        chrom, start, end = zone[:3]
-        for read in input_file_obj.fetch(chrom, start, end):
-            if not _is_valid_read(read):
-                continue
-            new_query_name = hashlib.md5((f'{read.query_name}_{filename}').encode()).hexdigest()
-            # Check if the read is already in the pending reads
-            pending_mate = pending_mates.pop(new_query_name, None)
-            if pending_mate is None:
-                pending_mates[new_query_name] = (read, read.query_name)
-            # Hash read name and file name to get an unique read name
-            read.query_name = new_query_name
-            read.set_tag('RG', RG_NAME)
-            to_write.put((output_file_obj, read))
+def _write_zones(zones, file_index, input_filename, output_filename, multithreaded):
+    input_file_obj = pysam.AlignmentFile(input_filename, threads=2 if multithreaded else 1)
+    output_filename_unsorted = f'{output_filename}.unsorted.{output_filename.split(".")[-1]}'
+    output_file_obj = _open_output_file(output_filename_unsorted, file_index, input_file_obj, multithreaded)
 
-    print(f'Flushing {len(pending_mates)} pending reads')
+    # Write reads
+    pending_reads = _write_reads_in_zones(zones, input_filename, input_file_obj, output_file_obj)
+    logging.debug(f'Found {len(pending_reads)} pending reads in {input_filename}')
 
-    pending_mates_list = list(pending_mates.values())
-    del pending_mates
-    # Write the missing mates
-    _flush_pending_mates(pending_mates_list, input_file_obj, output_file_obj)
+    # Write pending reads
+    _write_pending_mates(pending_reads, input_file_obj, output_file_obj)
+
+    output_file_obj.close()
+    input_file_obj.close()
+
+    logging.debug(f'Finished reading {input_filename} > {output_filename}')
+
+    # Sort the output file
+    pysam.sort('-o', output_filename, output_filename_unsorted, '-@', '2' if multithreaded else '1')
+    os.remove(output_filename_unsorted)
+
+    logging.debug(f'Finished sorting {output_filename}')
 
 
-def _open_output_file(output_file, file_index, template_file):
+def _open_output_file(output_file, file_index, template_file, multithreaded):
     # Get write mode based on the output file extension
     if output_file.endswith('.bam'):
         write_mode = 'wb'
@@ -100,7 +100,13 @@ def _open_output_file(output_file, file_index, template_file):
     new_header['RG'] = [{'ID': RG_NAME, 'SM': str(file_index)}]
 
     # Open the output file
-    return pysam.AlignmentFile(output_file, write_mode, header=new_header)
+    return pysam.AlignmentFile(output_file, write_mode, header=new_header, threads=2 if multithreaded else 1)
+
+
+def _merge_files(threads, output_files, output_file):
+    pysam.merge('-f', '-@', str(threads), *output_files, '-o', output_file)
+    for output_file in output_files:
+        os.remove(output_file)
 
 
 def _read_vcf(vcf_file, padding):
@@ -110,7 +116,6 @@ def _read_vcf(vcf_file, padding):
 
     # Create the dictionary of input files and zones
     zones = dict()
-    input_files = dict()
     for _, row in variants_df.iterrows():
         var_obj = row['variant_record_obj']
         files = var_obj.info['FILES']
@@ -118,11 +123,6 @@ def _read_vcf(vcf_file, padding):
             files = [files]
         # Get absolute paths
         files = [os.path.abspath(f) for f in files]
-        for idx, file in enumerate(files):
-            if file not in input_files:
-                input_files[file] = (idx, pysam.AlignmentFile(file))
-                # input_files[file] = (idx, None)
-
         # Add the zone
         start_chrom = row['start_chrom']
         end_chrom = row['end_chrom']
@@ -147,7 +147,7 @@ def _read_vcf(vcf_file, padding):
                 bisect.insort(zones[end_chrom], (row['end'] - padding, row['end'] + padding, files, str(var_obj)))
         else:
             bisect.insort(zones[start_chrom], (row['start'] - padding, row['end'] + padding, files, str(var_obj)))
-    return input_files, zones
+    return zones
 
 
 if __name__ == '__main__':
@@ -159,13 +159,15 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
 
+    logging.basicConfig(level=logging.DEBUG)
+
     # Convert everything to absolute paths
     args.input = os.path.abspath(args.input)
     args.outputs = [os.path.abspath(output) for output in args.outputs]
 
-    input_files, zones = _read_vcf(args.input, args.padding)
+    zones = _read_vcf(args.input, args.padding)
 
-    print(f'Loaded {len(input_files)} input files')
+    logging.debug(f'Loaded zones')
 
     end_analysis = False
     # Check for overlapping zones
@@ -173,11 +175,11 @@ if __name__ == '__main__':
         for i in range(1, len(chrom_zones)):
             if chrom_zones[i][0] < chrom_zones[i - 1][1]:
                 # Ask user if they want to continue
-                print(
+                logging.debug(
                     f'WARNING: Overlapping zones found in chromosome {chrom}. This may cause unrealistic final coverage.')
-                print(f'         Zone {i - 1}: {chrom_zones[i - 1]}')
-                print(f'         Zone {i}: {chrom_zones[i]}')
-                print('Continue? [y/n]')
+                logging.debug(f'         Zone {i - 1}: {chrom_zones[i - 1]}')
+                logging.debug(f'         Zone {i}: {chrom_zones[i]}')
+                logging.debug('Continue? [y/n]')
                 answer = input()
                 if answer != 'y':
                     sys.exit(1)
@@ -187,38 +189,48 @@ if __name__ == '__main__':
         if end_analysis:
             break
 
-    print('Successfully checked for overlapping zones')
-    # Create the output files
-    output_files = []
-    for idx, output_file in enumerate(args.outputs):
-        output_files.append(_open_output_file(output_file, idx, input_files[list(input_files.keys())[0]][1]))
+    logging.debug('Successfully checked for overlapping zones')
 
     # Group zones by input file
+    files_indexes = dict()
     zones_by_file = dict()
     for chrom, chrom_zones in zones.items():
         for zone in chrom_zones:
-            for file in zone[2]:
+            for file_index, file in enumerate(zone[2]):
+                files_indexes[file] = file_index
                 if file not in zones_by_file:
-                    zones_by_file[file] = []
-                zones_by_file[file].append((chrom, zone[0], zone[1]))
+                    zones_by_file[file] = dict()
+                if chrom not in zones_by_file[file]:
+                    zones_by_file[file][chrom] = []
+                zones_by_file[file][chrom].append(zone[:2])
+
     del zones
 
-    pool = ThreadPoolExecutor(args.threads)
+    output_files_dict = dict()
+    pool = ProcessPoolExecutor(args.threads)
     tasks = []
-    for file, zones in zones_by_file.items():
-        file_idx, input_file_obj = input_files[file]
-        output_file_obj = output_files[file_idx]
-        task = pool.submit(_write_zones, zones, file, input_file_obj, output_file_obj)
+    for filename, zones in zones_by_file.items():
+        file_index = files_indexes[filename]
+        filename_hash = hashlib.md5(filename.encode()).hexdigest()
+        output_filename = f'{args.outputs[file_index]}_{filename_hash}.{args.outputs[file_index].split(".")[-1]}'
+        if file_index not in output_files_dict:
+            output_files_dict[file_index] = []
+        output_files_dict[file_index].append(output_filename)
+        multithreaded = args.threads > 1
+        task = pool.submit(_write_zones, zones, file_index, filename, output_filename, multithreaded)
         tasks.append(task)
     for task in tasks:
         task.result()
     pool.shutdown()
 
-    # enqueue None to instruct the writer thread to exit
-    to_write.put(None)
+    # Merge files in parallel
+    pool = ProcessPoolExecutor(len(output_files_dict))
+    threads_per_file = max(args.threads // len(output_files_dict), 1)
+    for file_index, output_files in output_files_dict.items():
+        logging.debug(f'Merging {len(output_files)} files into {args.outputs[file_index]}')
+        pool.submit(_merge_files, threads_per_file, output_files, args.outputs[file_index])
+    for task in tasks:
+        task.result()
+    pool.shutdown()
 
-    # Close the output files
-    for output_file in output_files:
-        output_file.close()
-
-    print('Done')
+    logging.debug('Done')
