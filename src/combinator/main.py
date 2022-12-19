@@ -38,7 +38,9 @@ def _write_reads_in_zones(zones, input_filename, input_file_obj, output_file_obj
                 mate_read = pending_mates.pop(read.query_name, None)
                 if mate_read is None:
                     pending_mates[read.query_name] = (read, read.query_name)
-                _write_read(output_file_obj, read, input_filename)
+                else:
+                    _write_read(output_file_obj, read, input_filename)
+                    _write_read(output_file_obj, mate_read[0], input_filename)
     return pending_mates
 
 
@@ -57,7 +59,8 @@ def _find_mate(pending_mates, already_found_set, read, original_query_name, file
         elif mate_read.query_name not in already_found_set:
             # This read is another pending mate
             found_mates.append(mate_read)
-    raise Exception(f'Mate not found for read {original_query_name} ({read.query_name}) in file {file_obj.filename}')
+    logging.warn(f'Mate not found for read {original_query_name} ({read.query_name}) in file {file_obj.filename}. Ignoring it.')
+    return found_mates
 
 
 def _write_pending_mates(pending_mates, input_file_obj, output_file_obj, input_filename):
@@ -68,6 +71,8 @@ def _write_pending_mates(pending_mates, input_file_obj, output_file_obj, input_f
         reads = _find_mate(pending_mates, already_found_set, mate_read, original_query_name, input_file_obj)
         for read in reads:
             already_found_set.add(read.query_name)
+            original_read = pending_mates.get(read.query_name)[0]
+            _write_read(output_file_obj, original_read, input_filename)
             _write_read(output_file_obj, read, input_filename)
 
 
@@ -226,17 +231,26 @@ if __name__ == '__main__':
 
     del zones
 
+    zones_hash = hashlib.md5(str(zones_by_file).encode()).hexdigest()
     output_files_dict = dict()
     pool = ProcessPoolExecutor(args.maximum_processes)
     memory_per_process = args.maximum_memory / args.maximum_processes
     tasks = []
     for filename, zones in zones_by_file.items():
         file_index = files_indexes[filename]
-        filename_hash = hashlib.md5(filename.encode()).hexdigest()
+        filename_hash = hashlib.md5(filename.encode() + zones_hash.encode()).hexdigest()
         output_filename = f'{args.outputs[file_index]}_{filename_hash}.{args.outputs[file_index].split(".")[-1]}'
         if file_index not in output_files_dict:
             output_files_dict[file_index] = []
         output_files_dict[file_index].append(output_filename)
+        # If output file already exists and does have EOF, skip it
+        if os.path.exists(output_filename):
+            try:
+                pysam.quickcheck(output_filename)
+                logging.debug(f'Skipping {filename} because {output_filename} already exists')
+                continue
+            except:
+                pass
         task = pool.submit(_write_zones, zones, file_index, filename,
                            output_filename, args.multithreading, memory_per_process, args.fasta_ref)
         tasks.append(task)
