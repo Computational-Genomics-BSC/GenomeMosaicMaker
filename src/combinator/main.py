@@ -59,7 +59,7 @@ def _find_mate(pending_mates, already_found_set, read, original_query_name, file
         elif mate_read.query_name not in already_found_set:
             # This read is another pending mate
             found_mates.append(mate_read)
-    logging.warn(f'Mate not found for read {original_query_name} ({read.query_name}) in file {file_obj.filename}. Ignoring it.')
+    logging.warning(f'Mate not found for read {original_query_name} ({read.query_name}) in file {file_obj.filename}. Ignoring it.')
     return found_mates
 
 
