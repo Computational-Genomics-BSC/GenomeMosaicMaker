@@ -243,8 +243,8 @@ if __name__ == '__main__':
         if file_index not in output_files_dict:
             output_files_dict[file_index] = []
         output_files_dict[file_index].append(output_filename)
-        # If output file already exists and does have EOF, skip it
-        if os.path.exists(output_filename):
+        # If output file already exists and does have EOF (not SAM), skip it
+        if os.path.exists(output_filename) and not output_filename.endswith('.sam'):
             try:
                 pysam.quickcheck(output_filename)
                 logging.debug(f'Skipping {filename} because {output_filename} already exists')
