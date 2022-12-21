@@ -126,7 +126,7 @@ def _open_output_file(output_file, file_index, template_file, multithreading, fa
 
 
 def _merge_files(processes, output_files, output_file):
-    pysam.merge('-f', '-@', str(processes), *output_files, '-o', output_file)
+    pysam.merge('-f', '-c', '-@', str(processes), *output_files, '-o', output_file)
     for output_file in output_files:
         os.remove(output_file)
 
@@ -243,14 +243,6 @@ if __name__ == '__main__':
         if file_index not in output_files_dict:
             output_files_dict[file_index] = []
         output_files_dict[file_index].append(output_filename)
-        # If output file already exists and does have EOF (not SAM), skip it
-        if os.path.exists(output_filename) and not output_filename.endswith('.sam'):
-            try:
-                pysam.quickcheck(output_filename)
-                logging.debug(f'Skipping {filename} because {output_filename} already exists')
-                continue
-            except:
-                pass
         task = pool.submit(_write_zones, zones, file_index, filename,
                            output_filename, args.multithreading, memory_per_process, args.fasta_ref)
         tasks.append(task)
