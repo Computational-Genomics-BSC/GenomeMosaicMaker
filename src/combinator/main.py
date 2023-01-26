@@ -8,7 +8,7 @@ import argparse
 import pysam
 import bisect
 import hashlib
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 import logging
 
 # Add variant_extractor to PYTHONPATH
@@ -26,6 +26,72 @@ def _write_read(output_file_obj, read, input_filename):
     read.query_name = new_query_name
     read.set_tag('RG', RG_NAME)
     output_file_obj.write(read)
+
+
+def _get_reads_in_zones_chunk(input_file, zone_chunk, reference_fasta):
+    input_file_obj = pysam.AlignmentFile(input_file, reference_filename=reference_fasta)
+    inzone_reads = set()
+    for chrom, start, end in zone_chunk:
+        for read in input_file_obj.fetch(chrom, start, end):
+            inzone_reads.add(read.query_name)
+    return inzone_reads
+
+
+def _get_reads_in_zones(input_file, zones_dict, num_processes, reference_fasta):
+    # Get all zones in a list
+    zone_list = []
+    for chrom, chrom_zones in zones_dict.items():
+        for zone in chrom_zones:
+            zone_list.append((chrom, zone[0], zone[1]))
+    # Separate zones in chunks
+    zone_chunks = []
+    chunk_size = int(len(zone_list) / num_processes) + 1
+    for i in range(0, len(zone_list), chunk_size):
+        zone_chunks.append(zone_list[i:i + chunk_size])
+    # Get reads in zones
+    inzone_reads = set()
+    with ThreadPoolExecutor(max_workers=num_processes) as executor:
+        futures = []
+        for zone_chunk in zone_chunks:
+            futures.append(executor.submit(_get_reads_in_zones_chunk, input_file, zone_chunk, reference_fasta))
+        for future in futures:
+            inzone_reads.update(future.result())
+    return inzone_reads
+
+
+def _get_reads_generator(input_files, ref_names_order, multithreading, reference_fasta):
+    # Generator that yields reads from all input files in order
+    input_file_objs = [pysam.AlignmentFile(input_file, threads=2 if multithreading else 1,
+                                           reference_filename=reference_fasta) for input_file in input_files]
+    # Get all files read generators
+    read_generators = []
+    for input_file_obj in input_file_objs:
+        read_generators.append(input_file_obj.fetch(until_eof=True))
+    reads = [next(read_generator) for read_generator in read_generators]
+    # Yield reads in order (by reference name and then by start position)
+    while reads:
+        if len(reads) == 1:
+            yield reads[0]
+            try:
+                reads[0] = next(read_generators[0])
+            except StopIteration:
+                reads.pop(0)
+                read_generators.pop(0)
+            continue
+        # Get lowest reference name in the reference names order in the read list
+        min_ref_name = min(reads, key=lambda read: ref_names_order[read.reference_name]).reference_name
+        # Get the index of the read with the lowest start position in with the lowest reference name
+        min_start_index = min(
+            range(len(reads)), key=lambda i: reads[i].reference_start if reads[i].reference_name == min_ref_name else sys.maxsize)
+        # Yield the read
+        yield reads[min_start_index]
+        # Get the next read
+        try:
+            reads[min_start_index] = next(read_generators[min_start_index])
+        except StopIteration:
+            reads.pop(min_start_index)
+            read_generators.pop(min_start_index)
+    yield None
 
 
 def _write_reads_in_zones(zones, input_filename, input_file_obj, output_file_obj):
@@ -59,7 +125,8 @@ def _find_mate(pending_mates, already_found_set, read, original_query_name, file
         elif mate_read.query_name not in already_found_set:
             # This read is another pending mate
             found_mates.append(mate_read)
-    logging.warning(f'Mate not found for read {original_query_name} ({read.query_name}) in file {file_obj.filename}. Ignoring it.')
+    logging.warning(
+        f'Mate not found for read {original_query_name} ({read.query_name}) in file {file_obj.filename}. Ignoring it.')
     return found_mates
 
 
@@ -125,10 +192,44 @@ def _open_output_file(output_file, file_index, template_file, multithreading, fa
     return pysam.AlignmentFile(output_file, write_mode, header=new_header, threads=2 if multithreading else 1, reference_filename=fasta_ref)
 
 
-def _merge_files(processes, output_files, output_file):
-    pysam.merge('-f', '-c', '-@', str(processes), *output_files, '-o', output_file)
-    for output_file in output_files:
-        os.remove(output_file)
+def _merge_files(temp_output_files, file_index, output_file, zones, infill_file, num_processes, multithreading, fasta_ref):
+    # Open the output file
+    output_file_obj = _open_output_file(output_file, file_index,
+                                        pysam.AlignmentFile(temp_output_files[0], reference_filename=fasta_ref), multithreading, fasta_ref)
+    # Get the reads from the infill file that are in the zones
+    inzone_reads = _get_reads_in_zones(infill_file, zones, num_processes, fasta_ref)
+    # Open the infill file
+    infill_file_obj = pysam.AlignmentFile(infill_file, threads=2 if multithreading else 1, reference_filename=fasta_ref)
+    # Get reference names order
+    ref_names_order = dict()
+    for idx, ref_name in enumerate(output_file_obj.references):
+        ref_names_order[ref_name] = idx
+    # Get generator of reads from the temp output files
+    output_reads_generator = _get_reads_generator(temp_output_files, ref_names_order, multithreading, fasta_ref)
+    # Get the first read from the generator
+    output_read = next(output_reads_generator)
+    # Write the reads from the infill file
+    for infill_read in infill_file_obj.fetch(until_eof=True):
+        # Write the output reads until we reach the infill read
+        while output_read is not None and \
+            (infill_read.reference_name not in ref_names_order or
+             ref_names_order[output_read.reference_name] < ref_names_order[infill_read.reference_name] or
+             (output_read.reference_name == infill_read.reference_name and output_read.reference_start < infill_read.reference_start)):
+            output_file_obj.write(output_read)
+            output_read = next(output_reads_generator)
+        # Avoid writing the infill read if it is in a zone
+        if infill_read.query_name in inzone_reads:
+            continue
+        # Write the infill read
+        _write_read(output_file_obj, infill_read, infill_file)
+    # Write the remaining output reads
+    while output_read is not None:
+        output_file_obj.write(output_read)
+        output_read = next(output_reads_generator)
+
+    # Remove temp output files
+    for temp_output_file in temp_output_files:
+        os.remove(temp_output_file)
 
 
 def _read_vcf(vcf_file, padding):
@@ -175,11 +276,14 @@ def _read_vcf(vcf_file, padding):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--input', '-i', required=True, help='Input VCF file')
+    parser.add_argument('--infill-files', '-if', required=True, nargs='+', help='Infill alignment files')
     parser.add_argument('--outputs', '-o', required=True, nargs='+', help='Output alignment files')
     parser.add_argument('--padding', '-p', type=int, default=1000, help='Padding around the variants')
-    parser.add_argument('--maximum-processes', '-mp', type=int, default=1, help='Maximum number of processes to use')
+    parser.add_argument('--maximum-processes', '-mp', type=int, default=1,
+                        help='Maximum number of physical processes to use')
     parser.add_argument('--maximum-memory', '-mm', type=float, default=32, help='Maximum memory to use (in GiB)')
-    parser.add_argument('--multithreading', '-t', action='store_true', help='Use multithreading')
+    parser.add_argument('--multithreading', '-t', action='store_true',
+                        help='Use multithreading (2 threads per process)')
     parser.add_argument('--fasta-ref', '-f', type=str, help='Fasta reference file (used for CRAM files)')
 
     args = parser.parse_args()
@@ -189,6 +293,19 @@ if __name__ == '__main__':
     # Convert everything to absolute paths
     args.input = os.path.abspath(args.input)
     args.outputs = [os.path.abspath(output) for output in args.outputs]
+    args.infill_files = [os.path.abspath(infill_file) for infill_file in args.infill_files]
+
+    # Make sure the same number of infill files and output files are provided
+    if len(args.infill_files) != len(args.outputs):
+        raise Exception('The same number of infill files and output files must be provided')
+    # Make sure the infill files and output files are not the same
+    for infill_file, output_file in zip(args.infill_files, args.outputs):
+        if infill_file == output_file:
+            raise Exception('The infill files and output files must be different')
+    # Make sure the infill files exist and are not empty
+    for infill_file in args.infill_files:
+        if not os.path.isfile(infill_file) or os.path.getsize(infill_file) == 0:
+            raise Exception(f'The infill file {infill_file} does not exist or is empty')
 
     zones = _read_vcf(args.input, args.padding)
 
@@ -229,33 +346,37 @@ if __name__ == '__main__':
                     zones_by_file[file][chrom] = []
                 zones_by_file[file][chrom].append(zone[:2])
 
-    del zones
-
-    zones_hash = hashlib.md5(str(zones_by_file).encode()).hexdigest()
+    # Write zones to files
     output_files_dict = dict()
     pool = ProcessPoolExecutor(args.maximum_processes)
     memory_per_process = args.maximum_memory / args.maximum_processes
     tasks = []
-    for filename, zones in zones_by_file.items():
+    for filename, file_zones in zones_by_file.items():
+        zones_hash = hashlib.md5(str(file_zones).encode()).hexdigest()
         file_index = files_indexes[filename]
         filename_hash = hashlib.md5(filename.encode() + zones_hash.encode()).hexdigest()
         output_filename = f'{args.outputs[file_index]}_{filename_hash}.{args.outputs[file_index].split(".")[-1]}'
         if file_index not in output_files_dict:
             output_files_dict[file_index] = []
         output_files_dict[file_index].append(output_filename)
-        task = pool.submit(_write_zones, zones, file_index, filename,
+        # If the file already exists and is not empty, skip it
+        if os.path.isfile(output_filename) and os.path.getsize(output_filename) > 0:
+            logging.debug(f'Skipping {filename} because {output_filename} already exists')
+            continue
+        task = pool.submit(_write_zones, file_zones, file_index, filename,
                            output_filename, args.multithreading, memory_per_process, args.fasta_ref)
         tasks.append(task)
     for task in tasks:
         task.result()
-    pool.shutdown()
 
     # Merge files in parallel
-    pool = ProcessPoolExecutor(len(output_files_dict))
     processes_per_file = max(args.maximum_processes // len(output_files_dict), 1)
-    for file_index, output_files in output_files_dict.items():
-        logging.debug(f'Merging {len(output_files)} files into {args.outputs[file_index]}')
-        pool.submit(_merge_files, processes_per_file, output_files, args.outputs[file_index])
+    tasks = []
+    for file_index, temp_output_files in output_files_dict.items():
+        logging.debug(f'Merging {len(temp_output_files)} files into {args.outputs[file_index]}')
+        task = pool.submit(_merge_files, temp_output_files, file_index, args.outputs[file_index],
+                           zones, args.infill_files[file_index], processes_per_file, args.multithreading, args.fasta_ref)
+        tasks.append(task)
     for task in tasks:
         task.result()
     pool.shutdown()
