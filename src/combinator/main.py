@@ -18,13 +18,17 @@ sys.path.insert(0, VARIANT_EXTRACTOR_DIR)
 
 from variant_extractor import VariantExtractor  # noqa
 
-RG_NAME = 'COMBINED'
+DEFAULT_RG_NAME = 'COMBINED'
 
 
 def _write_read(output_file_obj, read, input_filename):
     new_query_name = hashlib.md5((f'{read.query_name}_{input_filename}').encode()).hexdigest()
     read.query_name = new_query_name
-    read.set_tag('RG', RG_NAME)
+    # Set read group if not present
+    rg_tag = read.get_tag('RG')
+    if rg_tag is None:
+        rg_tag = DEFAULT_RG_NAME
+    read.set_tag('RG', hashlib.md5((rg_tag).encode()).hexdigest())
     output_file_obj.write(read)
 
 
@@ -170,7 +174,7 @@ def _write_zones(zones, file_index, input_filename, output_filename, multithread
     logging.debug(f'Finished sorting {output_filename}')
 
 
-def _open_output_file(output_file, file_index, template_file, multithreading, fasta_ref):
+def _open_output_file(output_file, file_index, template_file, multithreading, fasta_ref, rewrite_rg=True):
     # Get write mode based on the output file extension
     if output_file.endswith('.bam'):
         write_mode = 'wb'
@@ -184,22 +188,26 @@ def _open_output_file(output_file, file_index, template_file, multithreading, fa
     # Get the header from the template file
     header = template_file.header
     new_header = header.to_dict()
-    # Remove the PG and RG lines
+    # Remove the PG lines
     new_header['PG'] = []
-    new_header['RG'] = [{'ID': RG_NAME, 'SM': str(file_index)}]
-
+    if rewrite_rg:
+        # Set the RG line
+        old_read_groups = new_header.get('RG', [])
+        new_read_groups = []
+        # Add the default RG line
+        old_read_groups.append({'ID': DEFAULT_RG_NAME})
+        # Add the SM tag to each RG and remove the other entries
+        for read_group in old_read_groups:
+            new_read_groups.append({'ID': hashlib.md5((read_group['ID']).encode()).hexdigest(), 'SM': str(file_index)})
+        new_header['RG'] = new_read_groups
     # Open the output file
     return pysam.AlignmentFile(output_file, write_mode, header=new_header, threads=2 if multithreading else 1, reference_filename=fasta_ref)
 
 
-def _merge_files(temp_output_files, file_index, output_file, zones, infill_file, num_processes, multithreading, fasta_ref):
+def _merge_files(temp_output_files, file_index, output_file, zones, num_processes, multithreading, fasta_ref, infill_file=None):
     # Open the output file
     output_file_obj = _open_output_file(output_file, file_index,
-                                        pysam.AlignmentFile(temp_output_files[0], reference_filename=fasta_ref), multithreading, fasta_ref)
-    # Get the reads from the infill file that are in the zones
-    inzone_reads = _get_reads_in_zones(infill_file, zones, num_processes, fasta_ref)
-    # Open the infill file
-    infill_file_obj = pysam.AlignmentFile(infill_file, threads=2 if multithreading else 1, reference_filename=fasta_ref)
+                                        pysam.AlignmentFile(temp_output_files[0], reference_filename=fasta_ref), multithreading, fasta_ref, rewrite_rg=False)
     # Get reference names order
     ref_names_order = dict()
     for idx, ref_name in enumerate(output_file_obj.references):
@@ -208,20 +216,26 @@ def _merge_files(temp_output_files, file_index, output_file, zones, infill_file,
     output_reads_generator = _get_reads_generator(temp_output_files, ref_names_order, multithreading, fasta_ref)
     # Get the first read from the generator
     output_read = next(output_reads_generator)
-    # Write the reads from the infill file
-    for infill_read in infill_file_obj.fetch(until_eof=True):
-        # Write the output reads until we reach the infill read
-        while output_read is not None and \
-            (infill_read.reference_name not in ref_names_order or
-             ref_names_order[output_read.reference_name] < ref_names_order[infill_read.reference_name] or
-             (output_read.reference_name == infill_read.reference_name and output_read.reference_start < infill_read.reference_start)):
-            output_file_obj.write(output_read)
-            output_read = next(output_reads_generator)
-        # Avoid writing the infill read if it is in a zone
-        if infill_read.query_name in inzone_reads:
-            continue
-        # Write the infill read
-        _write_read(output_file_obj, infill_read, infill_file)
+    if infill_file is not None:
+        # Get the reads from the infill file that are in the zones
+        inzone_reads = _get_reads_in_zones(infill_file, zones, num_processes, fasta_ref)
+        # Open the infill file
+        infill_file_obj = pysam.AlignmentFile(
+            infill_file, threads=2 if multithreading else 1, reference_filename=fasta_ref)
+        # Write the reads from the infill file
+        for infill_read in infill_file_obj.fetch(until_eof=True):
+            # Write the output reads until we reach the infill read
+            while output_read is not None and \
+                (infill_read.reference_name not in ref_names_order or
+                 ref_names_order[output_read.reference_name] < ref_names_order[infill_read.reference_name] or
+                 (output_read.reference_name == infill_read.reference_name and output_read.reference_start < infill_read.reference_start)):
+                output_file_obj.write(output_read)
+                output_read = next(output_reads_generator)
+            # Avoid writing the infill read if it is in a zone
+            if infill_read.query_name in inzone_reads:
+                continue
+            # Write the infill read
+            _write_read(output_file_obj, infill_read, infill_file)
     # Write the remaining output reads
     while output_read is not None:
         output_file_obj.write(output_read)
@@ -276,8 +290,8 @@ def _read_vcf(vcf_file, padding):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--input', '-i', required=True, help='Input VCF file')
-    parser.add_argument('--infill-files', '-if', required=True, nargs='+', help='Infill alignment files')
     parser.add_argument('--outputs', '-o', required=True, nargs='+', help='Output alignment files')
+    parser.add_argument('--infill-files', '-if', nargs='+', help='Infill alignment files')
     parser.add_argument('--padding', '-p', type=int, default=1000, help='Padding around the variants')
     parser.add_argument('--maximum-processes', '-mp', type=int, default=1,
                         help='Maximum number of physical processes to use')
@@ -293,19 +307,20 @@ if __name__ == '__main__':
     # Convert everything to absolute paths
     args.input = os.path.abspath(args.input)
     args.outputs = [os.path.abspath(output) for output in args.outputs]
-    args.infill_files = [os.path.abspath(infill_file) for infill_file in args.infill_files]
 
-    # Make sure the same number of infill files and output files are provided
-    if len(args.infill_files) != len(args.outputs):
-        raise Exception('The same number of infill files and output files must be provided')
-    # Make sure the infill files and output files are not the same
-    for infill_file, output_file in zip(args.infill_files, args.outputs):
-        if infill_file == output_file:
-            raise Exception('The infill files and output files must be different')
-    # Make sure the infill files exist and are not empty
-    for infill_file in args.infill_files:
-        if not os.path.isfile(infill_file) or os.path.getsize(infill_file) == 0:
-            raise Exception(f'The infill file {infill_file} does not exist or is empty')
+    if args.infill_files is not None:
+        args.infill_files = [os.path.abspath(infill_file) for infill_file in args.infill_files]
+        # Make sure the same number of infill files and output files are provided
+        if len(args.infill_files) != len(args.outputs):
+            raise Exception('The same number of infill files and output files must be provided')
+        # Make sure the infill files and output files are not the same
+        for infill_file, output_file in zip(args.infill_files, args.outputs):
+            if infill_file == output_file:
+                raise Exception('The infill files and output files must be different')
+        # Make sure the infill files exist and are not empty
+        for infill_file in args.infill_files:
+            if not os.path.isfile(infill_file) or os.path.getsize(infill_file) == 0:
+                raise Exception(f'The infill file {infill_file} does not exist or is empty')
 
     zones = _read_vcf(args.input, args.padding)
 
@@ -374,8 +389,9 @@ if __name__ == '__main__':
     tasks = []
     for file_index, temp_output_files in output_files_dict.items():
         logging.debug(f'Merging {len(temp_output_files)} files into {args.outputs[file_index]}')
+        infill_file = None if args.infill_files is None else args.infill_files[file_index]
         task = pool.submit(_merge_files, temp_output_files, file_index, args.outputs[file_index],
-                           zones, args.infill_files[file_index], processes_per_file, args.multithreading, args.fasta_ref)
+                           zones, processes_per_file, args.multithreading, args.fasta_ref, infill_file)
         tasks.append(task)
     for task in tasks:
         task.result()
