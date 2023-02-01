@@ -63,10 +63,8 @@ def _get_reads_in_zones(input_file, zones_dict, num_processes, reference_fasta):
     return inzone_reads
 
 
-def _get_reads_generator(input_files, ref_names_order, multithreading, reference_fasta):
+def _get_reads_generator(input_file_objs, ref_names_order):
     # Generator that yields reads from all input files in order
-    input_file_objs = [pysam.AlignmentFile(input_file, threads=2 if multithreading else 1,
-                                           reference_filename=reference_fasta) for input_file in input_files]
     # Get all files read generators
     read_generators = []
     for input_file_obj in input_file_objs:
@@ -151,7 +149,8 @@ def _write_zones(zones, file_index, input_filename, output_filename, multithread
     input_file_obj = pysam.AlignmentFile(
         input_filename, threads=2 if multithreading else 1, reference_filename=fasta_ref)
     output_filename_unsorted = f'{output_filename}.unsorted.{output_filename.split(".")[-1]}'
-    output_file_obj = _open_output_file(output_filename_unsorted, file_index, input_file_obj, multithreading, fasta_ref)
+    output_file_obj = _open_output_file(output_filename_unsorted, file_index, [
+                                        input_file_obj], multithreading, fasta_ref)
 
     # Write reads
     pending_reads = _write_reads_in_zones(zones, input_filename, input_file_obj, output_file_obj)
@@ -174,7 +173,7 @@ def _write_zones(zones, file_index, input_filename, output_filename, multithread
     logging.debug(f'Finished sorting {output_filename}')
 
 
-def _open_output_file(output_file, file_index, template_file, multithreading, fasta_ref, rewrite_rg=True):
+def _open_output_file(output_file, file_index, template_files, multithreading, fasta_ref, rewrite_rg=True):
     # Get write mode based on the output file extension
     if output_file.endswith('.bam'):
         write_mode = 'wb'
@@ -186,34 +185,41 @@ def _open_output_file(output_file, file_index, template_file, multithreading, fa
         raise Exception('Invalid output file extension')
 
     # Get the header from the template file
-    header = template_file.header
+    header = template_files[0].header
     new_header = header.to_dict()
     # Remove the PG lines
     new_header['PG'] = []
+    old_read_group_dict = {}
+    for f in template_files:
+        for rg in f.header.to_dict().get('RG', []):
+            old_read_group_dict[rg['ID']] = rg
     if rewrite_rg:
         # Set the RG line
-        old_read_groups = new_header.get('RG', [])
         new_read_groups = []
         # Add the default RG line
-        old_read_groups.append({'ID': DEFAULT_RG_NAME})
+        old_read_group_dict[DEFAULT_RG_NAME] = {'ID': DEFAULT_RG_NAME}
         # Add the SM tag to each RG and remove the other entries
-        for read_group in old_read_groups:
+        for read_group in old_read_group_dict.values():
             new_read_groups.append({'ID': hashlib.md5((read_group['ID']).encode()).hexdigest(), 'SM': str(file_index)})
-        new_header['RG'] = new_read_groups
+    else:
+        new_read_groups = list(old_read_group_dict.values())
+    new_header['RG'] = new_read_groups
     # Open the output file
     return pysam.AlignmentFile(output_file, write_mode, header=new_header, threads=2 if multithreading else 1, reference_filename=fasta_ref)
 
 
 def _merge_files(temp_output_files, file_index, output_file, zones, num_processes, multithreading, fasta_ref, infill_file=None):
+    temp_output_files_objs = [pysam.AlignmentFile(f, threads=2 if multithreading else 1,
+                                                  reference_filename=fasta_ref) for f in temp_output_files]
     # Open the output file
-    output_file_obj = _open_output_file(output_file, file_index,
-                                        pysam.AlignmentFile(temp_output_files[0], reference_filename=fasta_ref), multithreading, fasta_ref, rewrite_rg=False)
+    output_file_obj = _open_output_file(output_file, file_index, temp_output_files_objs,
+                                        multithreading, fasta_ref, rewrite_rg=False)
     # Get reference names order
     ref_names_order = dict()
     for idx, ref_name in enumerate(output_file_obj.references):
         ref_names_order[ref_name] = idx
     # Get generator of reads from the temp output files
-    output_reads_generator = _get_reads_generator(temp_output_files, ref_names_order, multithreading, fasta_ref)
+    output_reads_generator = _get_reads_generator(temp_output_files_objs, ref_names_order)
     # Get the first read from the generator
     output_read = next(output_reads_generator)
     if infill_file is not None:
