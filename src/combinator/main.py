@@ -149,8 +149,8 @@ def _write_zones(zones, file_index, input_filename, output_filename, multithread
     input_file_obj = pysam.AlignmentFile(
         input_filename, threads=2 if multithreading else 1, reference_filename=fasta_ref)
     output_filename_unsorted = f'{output_filename}.unsorted.{output_filename.split(".")[-1]}'
-    output_file_obj = _open_output_file(output_filename_unsorted, file_index, [
-                                        input_file_obj], multithreading, fasta_ref)
+    output_file_obj = _open_output_file(output_filename_unsorted, [_get_sam_header(
+        input_file_obj, file_index)], multithreading, fasta_ref)
 
     # Write reads
     pending_reads = _write_reads_in_zones(zones, input_filename, input_file_obj, output_file_obj)
@@ -173,26 +173,13 @@ def _write_zones(zones, file_index, input_filename, output_filename, multithread
     logging.debug(f'Finished sorting {output_filename}')
 
 
-def _open_output_file(output_file, file_index, template_files, multithreading, fasta_ref, rewrite_rg=True):
-    # Get write mode based on the output file extension
-    if output_file.endswith('.bam'):
-        write_mode = 'wb'
-    elif output_file.endswith('.sam'):
-        write_mode = 'wh'
-    elif output_file.endswith('.cram'):
-        write_mode = 'wc'
-    else:
-        raise Exception('Invalid output file extension')
-
-    # Get the header from the template file
-    header = template_files[0].header
-    new_header = header.to_dict()
+def _get_sam_header(file_obj, file_index, rewrite_rg=True):
+    header = file_obj.header.to_dict()
     # Remove the PG lines
-    new_header['PG'] = []
+    header['PG'] = []
     old_read_group_dict = {}
-    for f in template_files:
-        for rg in f.header.to_dict().get('RG', []):
-            old_read_group_dict[rg['ID']] = rg
+    for rg in header.get('RG', []):
+        old_read_group_dict[rg['ID']] = rg
     if rewrite_rg:
         # Set the RG line
         new_read_groups = []
@@ -203,7 +190,28 @@ def _open_output_file(output_file, file_index, template_files, multithreading, f
             new_read_groups.append({'ID': hashlib.md5((read_group['ID']).encode()).hexdigest(), 'SM': str(file_index)})
     else:
         new_read_groups = list(old_read_group_dict.values())
-    new_header['RG'] = new_read_groups
+    header['RG'] = new_read_groups
+    return header
+
+
+def _open_output_file(output_file, headers, multithreading, fasta_ref):
+    # Get write mode based on the output file extension
+    if output_file.endswith('.bam'):
+        write_mode = 'wb'
+    elif output_file.endswith('.sam'):
+        write_mode = 'wh'
+    elif output_file.endswith('.cram'):
+        write_mode = 'wc'
+    else:
+        raise Exception('Invalid output file extension')
+
+    # Combine the RG from the headers
+    new_header = headers[0]
+    read_group_dict = {}
+    for header in headers:
+        for rg in header.get('RG', []):
+            read_group_dict[rg['ID']] = rg
+    new_header['RG'] = list(read_group_dict.values())
     # Open the output file
     return pysam.AlignmentFile(output_file, write_mode, header=new_header, threads=2 if multithreading else 1, reference_filename=fasta_ref)
 
@@ -211,9 +219,11 @@ def _open_output_file(output_file, file_index, template_files, multithreading, f
 def _merge_files(temp_output_files, file_index, output_file, zones, num_processes, multithreading, fasta_ref, infill_file=None):
     temp_output_files_objs = [pysam.AlignmentFile(f, threads=2 if multithreading else 1,
                                                   reference_filename=fasta_ref) for f in temp_output_files]
+    template_headers = [_get_sam_header(f_obj, file_index, rewrite_rg=False) for f_obj in temp_output_files_objs] + \
+        ([_get_sam_header(pysam.AlignmentFile(infill_file, reference_filename=fasta_ref), file_index, rewrite_rg=True)]
+         if infill_file is not None else [])
     # Open the output file
-    output_file_obj = _open_output_file(output_file, file_index, temp_output_files_objs,
-                                        multithreading, fasta_ref, rewrite_rg=False)
+    output_file_obj = _open_output_file(output_file, template_headers, multithreading, fasta_ref)
     # Get reference names order
     ref_names_order = dict()
     for idx, ref_name in enumerate(output_file_obj.references):
@@ -242,10 +252,17 @@ def _merge_files(temp_output_files, file_index, output_file, zones, num_processe
                 continue
             # Write the infill read
             _write_read(output_file_obj, infill_read, infill_file)
+        # Close the infill file
+        infill_file_obj.close()
     # Write the remaining output reads
     while output_read is not None:
         output_file_obj.write(output_read)
         output_read = next(output_reads_generator)
+
+    # Close the output file
+    output_file_obj.close()
+    # Close the temp output files
+    [f.close() for f in temp_output_files_objs]
 
     # Remove temp output files
     for temp_output_file in temp_output_files:
