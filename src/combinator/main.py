@@ -21,14 +21,17 @@ from variant_extractor import VariantExtractor  # noqa
 DEFAULT_RG_NAME = 'COMBINED'
 
 
-def _write_read(output_file_obj, read, input_filename):
+def _write_read(output_file_obj, read, input_filename, split_rg):
     new_query_name = hashlib.md5((f'{read.query_name}_{input_filename}').encode()).hexdigest()
     read.query_name = new_query_name
-    # Set read group if not present
-    rg_tag = read.get_tag('RG')
-    if rg_tag is None:
-        rg_tag = DEFAULT_RG_NAME
-    read.set_tag('RG', hashlib.md5((rg_tag).encode()).hexdigest())
+    if split_rg:
+        # Set read group if not present
+        rg_tag = read.get_tag('RG')
+        if rg_tag is None:
+            rg_tag = DEFAULT_RG_NAME
+        read.set_tag('RG', hashlib.md5((rg_tag).encode()).hexdigest())
+    else:
+        read.set_tag('RG', DEFAULT_RG_NAME)
     output_file_obj.write(read)
 
 
@@ -96,7 +99,7 @@ def _get_reads_generator(input_file_objs, ref_names_order):
     yield None
 
 
-def _write_reads_in_zones(zones, input_filename, input_file_obj, output_file_obj):
+def _write_reads_in_zones(zones, input_filename, input_file_obj, output_file_obj, split_rg):
     pending_mates = dict()
     for chrom, chrom_zones in zones.items():
         for zone in chrom_zones:
@@ -107,8 +110,8 @@ def _write_reads_in_zones(zones, input_filename, input_file_obj, output_file_obj
                 if mate_read is None:
                     pending_mates[read.query_name] = (read, read.query_name)
                 else:
-                    _write_read(output_file_obj, read, input_filename)
-                    _write_read(output_file_obj, mate_read[0], input_filename)
+                    _write_read(output_file_obj, read, input_filename, split_rg)
+                    _write_read(output_file_obj, mate_read[0], input_filename, split_rg)
     return pending_mates
 
 
@@ -132,7 +135,7 @@ def _find_mate(pending_mates, already_found_set, read, original_query_name, file
     return found_mates
 
 
-def _write_pending_mates(pending_mates, input_file_obj, output_file_obj, input_filename):
+def _write_pending_mates(pending_mates, input_file_obj, output_file_obj, input_filename, split_rg):
     already_found_set = set()
     for mate_read, original_query_name in pending_mates.values():
         if original_query_name in already_found_set:
@@ -141,23 +144,23 @@ def _write_pending_mates(pending_mates, input_file_obj, output_file_obj, input_f
         for read in reads:
             already_found_set.add(read.query_name)
             original_read = pending_mates.get(read.query_name)[0]
-            _write_read(output_file_obj, original_read, input_filename)
-            _write_read(output_file_obj, read, input_filename)
+            _write_read(output_file_obj, original_read, input_filename, split_rg)
+            _write_read(output_file_obj, read, input_filename, split_rg)
 
 
-def _write_zones(zones, file_index, input_filename, output_filename, multithreading, max_memory, fasta_ref):
+def _write_zones(zones, file_index, input_filename, output_filename, multithreading, max_memory, fasta_ref, split_rg):
     input_file_obj = pysam.AlignmentFile(
         input_filename, threads=2 if multithreading else 1, reference_filename=fasta_ref)
     output_filename_unsorted = f'{output_filename}.unsorted.{output_filename.split(".")[-1]}'
     output_file_obj = _open_output_file(output_filename_unsorted, [_get_sam_header(
-        input_file_obj, file_index)], multithreading, fasta_ref)
+        input_file_obj, file_index, split_rg)], multithreading, fasta_ref)
 
     # Write reads
-    pending_reads = _write_reads_in_zones(zones, input_filename, input_file_obj, output_file_obj)
+    pending_reads = _write_reads_in_zones(zones, input_filename, input_file_obj, output_file_obj, split_rg)
     logging.debug(f'Found {len(pending_reads)} pending reads in {input_filename} > {output_filename}')
 
     # Write pending reads
-    _write_pending_mates(pending_reads, input_file_obj, output_file_obj, input_filename)
+    _write_pending_mates(pending_reads, input_file_obj, output_file_obj, input_filename, split_rg)
 
     output_file_obj.close()
     input_file_obj.close()
@@ -173,7 +176,7 @@ def _write_zones(zones, file_index, input_filename, output_filename, multithread
     logging.debug(f'Finished sorting {output_filename}')
 
 
-def _get_sam_header(file_obj, file_index, rewrite_rg=True):
+def _get_sam_header(file_obj, file_index, split_rg, rewrite_rg=True):
     header = file_obj.header.to_dict()
     # Remove the PG lines
     header['PG'] = []
@@ -181,13 +184,17 @@ def _get_sam_header(file_obj, file_index, rewrite_rg=True):
     for rg in header.get('RG', []):
         old_read_group_dict[rg['ID']] = rg
     if rewrite_rg:
-        # Set the RG line
-        new_read_groups = []
-        # Add the default RG line
-        old_read_group_dict[DEFAULT_RG_NAME] = {'ID': DEFAULT_RG_NAME}
-        # Add the SM tag to each RG and remove the other entries
-        for read_group in old_read_group_dict.values():
-            new_read_groups.append({'ID': hashlib.md5((read_group['ID']).encode()).hexdigest(), 'SM': str(file_index)})
+        if split_rg:
+            # Set the RG line
+            new_read_groups = []
+            # Add the default RG line
+            old_read_group_dict[DEFAULT_RG_NAME] = {'ID': DEFAULT_RG_NAME}
+            # Add the SM tag to each RG and remove the other entries
+            for read_group in old_read_group_dict.values():
+                new_read_groups.append(
+                    {'ID': hashlib.md5((read_group['ID']).encode()).hexdigest(), 'SM': str(file_index)})
+        else:
+            new_read_groups = [{'ID': DEFAULT_RG_NAME, 'SM': str(file_index)}]
     else:
         new_read_groups = list(old_read_group_dict.values())
     header['RG'] = new_read_groups
@@ -216,11 +223,11 @@ def _open_output_file(output_file, headers, multithreading, fasta_ref):
     return pysam.AlignmentFile(output_file, write_mode, header=new_header, threads=2 if multithreading else 1, reference_filename=fasta_ref)
 
 
-def _merge_files(temp_output_files, file_index, output_file, zones, num_processes, multithreading, fasta_ref, infill_file=None):
+def _merge_files(temp_output_files, file_index, output_file, zones, num_processes, multithreading, fasta_ref, split_rg, infill_file=None):
     temp_output_files_objs = [pysam.AlignmentFile(f, threads=2 if multithreading else 1,
                                                   reference_filename=fasta_ref) for f in temp_output_files]
-    template_headers = [_get_sam_header(f_obj, file_index, rewrite_rg=False) for f_obj in temp_output_files_objs] + \
-        ([_get_sam_header(pysam.AlignmentFile(infill_file, reference_filename=fasta_ref), file_index, rewrite_rg=True)]
+    template_headers = [_get_sam_header(f_obj, file_index, split_rg, rewrite_rg=False) for f_obj in temp_output_files_objs] + \
+        ([_get_sam_header(pysam.AlignmentFile(infill_file, reference_filename=fasta_ref), file_index, split_rg, rewrite_rg=True)]
          if infill_file is not None else [])
     # Open the output file
     output_file_obj = _open_output_file(output_file, template_headers, multithreading, fasta_ref)
@@ -251,7 +258,7 @@ def _merge_files(temp_output_files, file_index, output_file, zones, num_processe
             if infill_read.query_name in inzone_reads:
                 continue
             # Write the infill read
-            _write_read(output_file_obj, infill_read, infill_file)
+            _write_read(output_file_obj, infill_read, infill_file, split_rg)
         # Close the infill file
         infill_file_obj.close()
     # Write the remaining output reads
@@ -322,6 +329,8 @@ if __name__ == '__main__':
     parser.add_argument('--multithreading', '-t', action='store_true',
                         help='Use multithreading (2 threads per process)')
     parser.add_argument('--fasta-ref', '-f', type=str, help='Fasta reference file (used for CRAM files)')
+    parser.add_argument('--split-read-groups', '-k', action='store_true',
+                        help='Keep the read groups separate (they will be anonymized)')
 
     args = parser.parse_args()
 
@@ -401,8 +410,8 @@ if __name__ == '__main__':
         if os.path.isfile(output_filename) and os.path.getsize(output_filename) > 0:
             logging.debug(f'Skipping {filename} because {output_filename} already exists')
             continue
-        task = pool.submit(_write_zones, file_zones, file_index, filename,
-                           output_filename, args.multithreading, memory_per_process, args.fasta_ref)
+        task = pool.submit(_write_zones, file_zones, file_index, filename, output_filename,
+                           args.multithreading, memory_per_process, args.fasta_ref, args.split_read_groups)
         tasks.append(task)
     for task in tasks:
         task.result()
@@ -414,7 +423,7 @@ if __name__ == '__main__':
         logging.debug(f'Merging {len(temp_output_files)} files into {args.outputs[file_index]}')
         infill_file = None if args.infill_files is None else args.infill_files[file_index]
         task = pool.submit(_merge_files, temp_output_files, file_index, args.outputs[file_index],
-                           zones, processes_per_file, args.multithreading, args.fasta_ref, infill_file)
+                           zones, processes_per_file, args.multithreading, args.fasta_ref, args.split_read_groups, infill_file)
         tasks.append(task)
     for task in tasks:
         task.result()
