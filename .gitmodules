@@ -1,4 +1,0 @@
-[submodule "dependencies/variant-extractor"]
-	path = dependencies/variant-extractor
-	url = https://github.com/EUCANCan/variant-extractor
-	branch = main

@@ -12,10 +12,6 @@ import hashlib
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 import logging
 
-# Add variant_extractor to PYTHONPATH
-VARIANT_EXTRACTOR_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__),
-                                                     '..', '..', 'dependencies', 'variant-extractor', 'src'))
-sys.path.insert(0, VARIANT_EXTRACTOR_DIR)
 
 from variant_extractor import VariantExtractor  # noqa
 
