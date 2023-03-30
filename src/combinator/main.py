@@ -6,6 +6,7 @@ import os
 import sys
 import argparse
 import pysam
+import subprocess
 import bisect
 import hashlib
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
@@ -99,81 +100,24 @@ def _get_reads_generator(input_file_objs, ref_names_order):
     yield None
 
 
-def _write_reads_in_zones(zones, input_filename, input_file_obj, output_file_obj, split_rg):
-    pending_mates = dict()
-    for chrom, chrom_zones in zones.items():
-        for zone in chrom_zones:
-            for read in input_file_obj.fetch(chrom, zone[0], zone[1]):
-                if read.is_secondary or read.is_supplementary:
-                    continue
-                mate_read = pending_mates.pop(read.query_name, None)
-                if mate_read is None:
-                    pending_mates[read.query_name] = (read, read.query_name)
-                else:
-                    _write_read(output_file_obj, read, input_filename, split_rg)
-                    _write_read(output_file_obj, mate_read[0], input_filename, split_rg)
-    return pending_mates
+def _write_zones(zones, input_filename, output_filename, available_threads, fasta_ref=None):
+    # Write a BED file with the zones
+    zones_filename = f'{output_filename}.zones.bed'
+    with open(zones_filename, 'w') as zones_file:
+        for chrom, chrom_zones in zones.items():
+            for zone in chrom_zones:
+                zones_file.write(f'{chrom}\t{zone[0]}\t{zone[1]}')
+                zones_file.write('\n')
+    logging.debug(f'Loaded zones for {input_filename} > {output_filename}')
 
-
-def _find_mate(pending_mates, already_found_set, read, original_query_name, file_obj):
-    found_mates = []
-    for mate_read in file_obj.fetch(read.next_reference_name, read.next_reference_start, read.next_reference_start + 1):
-        if mate_read.is_secondary or mate_read.is_supplementary:
-            continue
-        pending_read, _ = pending_mates.get(mate_read.query_name, (None, None))
-        if pending_read is None or mate_read.is_read1 == pending_read.is_read1:
-            continue
-        # Check if the mate is the one we are looking for
-        if mate_read.query_name == original_query_name:
-            found_mates.append(mate_read)
-            return found_mates
-        elif mate_read.query_name not in already_found_set:
-            # This read is another pending mate
-            found_mates.append(mate_read)
-    logging.warning(
-        f'Mate not found for read {original_query_name} ({read.query_name}) in file {file_obj.filename}. Ignoring it.')
-    return found_mates
-
-
-def _write_pending_mates(pending_mates, input_file_obj, output_file_obj, input_filename, split_rg):
-    already_found_set = set()
-    for mate_read, original_query_name in pending_mates.values():
-        if original_query_name in already_found_set:
-            continue
-        reads = _find_mate(pending_mates, already_found_set, mate_read, original_query_name, input_file_obj)
-        for read in reads:
-            already_found_set.add(read.query_name)
-            original_read = pending_mates.get(read.query_name)[0]
-            _write_read(output_file_obj, original_read, input_filename, split_rg)
-            _write_read(output_file_obj, read, input_filename, split_rg)
-
-
-def _write_zones(zones, file_index, input_filename, output_filename, multithreading, max_memory, fasta_ref, split_rg):
-    input_file_obj = pysam.AlignmentFile(
-        input_filename, threads=2 if multithreading else 1, reference_filename=fasta_ref)
-    output_filename_unsorted = f'{output_filename}.unsorted.{output_filename.split(".")[-1]}'
-    output_file_obj = _open_output_file(output_filename_unsorted, [_get_sam_header(
-        input_file_obj, file_index, split_rg)], multithreading, fasta_ref)
-
-    # Write reads
-    pending_reads = _write_reads_in_zones(zones, input_filename, input_file_obj, output_file_obj, split_rg)
-    logging.debug(f'Found {len(pending_reads)} pending reads in {input_filename} > {output_filename}')
-
-    # Write pending reads
-    _write_pending_mates(pending_reads, input_file_obj, output_file_obj, input_filename, split_rg)
-
-    output_file_obj.close()
-    input_file_obj.close()
-
+    # Call samtools to write the reads in the zones
+    args = ['samtools', 'view', '-L', zones_filename, '-@', str(available_threads),
+            '-P', '-h', '-o', output_filename, input_filename]
+    if fasta_ref:
+        args.extend(['-T', fasta_ref])
+    subprocess.run(args, check=True)
     logging.debug(f'Finished reading {input_filename} > {output_filename}')
-
-    max_memory_mb = int(max_memory * 1024)
-    # Sort the output file
-    pysam.sort('-o', output_filename, '-m', f'{max_memory_mb}M', '-T', f'{output_filename}_temp',
-               output_filename_unsorted, '-@', '2' if multithreading else '1')
-    os.remove(output_filename_unsorted)
-
-    logging.debug(f'Finished sorting {output_filename}')
+    os.remove(zones_filename)
 
 
 def _get_sam_header(file_obj, file_index, split_rg, rewrite_rg=True):
@@ -226,7 +170,7 @@ def _open_output_file(output_file, headers, multithreading, fasta_ref):
 def _merge_files(temp_output_files, file_index, output_file, zones, num_processes, multithreading, fasta_ref, split_rg, infill_file=None):
     temp_output_files_objs = [pysam.AlignmentFile(f, threads=2 if multithreading else 1,
                                                   reference_filename=fasta_ref) for f in temp_output_files]
-    template_headers = [_get_sam_header(f_obj, file_index, split_rg, rewrite_rg=False) for f_obj in temp_output_files_objs] + \
+    template_headers = [_get_sam_header(f_obj, file_index, split_rg, rewrite_rg=True) for f_obj in temp_output_files_objs] + \
         ([_get_sam_header(pysam.AlignmentFile(infill_file, reference_filename=fasta_ref), file_index, split_rg, rewrite_rg=True)]
          if infill_file is not None else [])
     # Open the output file
@@ -252,7 +196,7 @@ def _merge_files(temp_output_files, file_index, output_file, zones, num_processe
                 (infill_read.reference_name not in ref_names_order or
                  ref_names_order[output_read.reference_name] < ref_names_order[infill_read.reference_name] or
                  (output_read.reference_name == infill_read.reference_name and output_read.reference_start < infill_read.reference_start)):
-                output_file_obj.write(output_read)
+                _write_read(output_file_obj, output_read, infill_file, split_rg)
                 output_read = next(output_reads_generator)
             # Avoid writing the infill read if it is in a zone
             if infill_read.query_name in inzone_reads:
@@ -263,7 +207,7 @@ def _merge_files(temp_output_files, file_index, output_file, zones, num_processe
         infill_file_obj.close()
     # Write the remaining output reads
     while output_read is not None:
-        output_file_obj.write(output_read)
+        _write_read(output_file_obj, output_read, infill_file, split_rg)
         output_read = next(output_reads_generator)
 
     # Close the output file
@@ -325,11 +269,10 @@ if __name__ == '__main__':
     parser.add_argument('--padding', '-p', type=int, default=1000, help='Padding around the variants')
     parser.add_argument('--maximum-processes', '-mp', type=int, default=1,
                         help='Maximum number of physical processes to use')
-    parser.add_argument('--maximum-memory', '-mm', type=float, default=32, help='Maximum memory to use (in GiB)')
     parser.add_argument('--multithreading', '-t', action='store_true',
                         help='Use multithreading (2 threads per process)')
     parser.add_argument('--fasta-ref', '-f', type=str, help='Fasta reference file (used for CRAM files)')
-    parser.add_argument('--split-read-groups', '-k', action='store_true',
+    parser.add_argument('--split-read-groups', action='store_true',
                         help='Keep the read groups separate (they will be anonymized)')
 
     args = parser.parse_args()
@@ -395,8 +338,8 @@ if __name__ == '__main__':
 
     # Write zones to files
     output_files_dict = dict()
-    pool = ProcessPoolExecutor(args.maximum_processes)
-    memory_per_process = args.maximum_memory / args.maximum_processes
+    pool = ProcessPoolExecutor(min(args.maximum_processes, len(zones_by_file)))
+    processes_per_file = max(args.maximum_processes // len(zones_by_file), 1)
     tasks = []
     for filename, file_zones in zones_by_file.items():
         zones_hash = hashlib.md5(str(file_zones).encode()).hexdigest()
@@ -410,8 +353,7 @@ if __name__ == '__main__':
         if os.path.isfile(output_filename) and os.path.getsize(output_filename) > 0:
             logging.debug(f'Skipping {filename} because {output_filename} already exists')
             continue
-        task = pool.submit(_write_zones, file_zones, file_index, filename, output_filename,
-                           args.multithreading, memory_per_process, args.fasta_ref, args.split_read_groups)
+        task = pool.submit(_write_zones, file_zones, filename, output_filename, processes_per_file, args.fasta_ref)
         tasks.append(task)
     for task in tasks:
         task.result()
