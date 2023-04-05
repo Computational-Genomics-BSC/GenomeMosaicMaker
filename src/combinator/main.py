@@ -13,7 +13,8 @@ from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 import logging
 
 
-from variant_extractor import VariantExtractor  # noqa
+from variant_extractor import VariantExtractor
+from variant_extractor.variants import VariantType
 
 DEFAULT_RG_NAME = 'COMBINED'
 
@@ -238,15 +239,15 @@ def _read_vcf(vcf_file, padding):
         if end_chrom not in zones:
             zones[end_chrom] = []
         var_type = row['type_inferred']
-        if var_type == 'SNV':
+        if var_type == VariantType.SNV.name:
             bisect.insort(zones[start_chrom], (row['start'] - padding, row['start'] + padding, files, str(var_obj)))
-        elif var_type == 'INS':
+        elif var_type == VariantType.INS.name:
             bisect.insort(zones[start_chrom], (row['start'] - padding, row['start'] +
                           row['length'] + padding, files, str(var_obj)))
-        elif var_type == 'TRN':
+        elif var_type == VariantType.TRA.name:
             bisect.insort(zones[start_chrom], (row['start'] - padding, row['start'] + padding, files, str(var_obj)))
             bisect.insort(zones[end_chrom], (row['end'] - padding, row['end'] + padding, files, str(var_obj)))
-        elif var_type == 'INV':
+        elif var_type == VariantType.INV.name:
             if row['start'] + padding > row['end'] - padding:
                 bisect.insort(zones[start_chrom], (row['start'] - padding, row['end'] + padding, files, str(var_obj)))
             else:
