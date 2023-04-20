@@ -105,16 +105,54 @@ def _write_zones(zones, input_filename, output_filename, available_threads, fast
             for zone in chrom_zones:
                 zones_file.write(f'{chrom}\t{zone[0]}\t{zone[1]}')
                 zones_file.write('\n')
-    logging.debug(f'Loaded zones for {input_filename} > {output_filename}')
 
-    # Call samtools to write the reads in the zones
-    args = ['samtools', 'view', '-L', zones_filename, '-@', str(available_threads),
-            '-P', '-h', '-o', output_filename, input_filename]
+    output_prefix = os.path.splitext(output_filename)[0]
+    output_suffix = os.path.splitext(output_filename)[1]
+
+    # Call samtools to write the reads (without supplementary or secondary 0x900) in the zones
+    primary_filename = f'{output_prefix}.primary{output_suffix}'
+    args = ['samtools', 'view', '--region-file', zones_filename, '-@', str(available_threads),
+            '-P', '-F', '0x900', '-h', '-o', primary_filename, input_filename]
     if fasta_ref:
         args.extend(['-T', fasta_ref])
     subprocess.run(args, check=True)
-    logging.debug(f'Finished reading {input_filename} > {output_filename}')
+    logging.debug(f'Loaded primary reads for {input_filename} > {primary_filename}')
+
+    qnames_filename = f'{output_filename}.qnames.txt'
+    with pysam.AlignmentFile(primary_filename, 'r') as primary_file_obj:
+        with open(qnames_filename, 'w') as qnames_file:
+            for read in primary_file_obj.fetch(until_eof=True):
+                qnames_file.write(f'{read.query_name}\n')
+
+    # Call samtools to write the reads (with only supplementary 0x800) in the zones
+    supplementary_filename = f'{output_prefix}.supplementary{output_suffix}'
+    args = ['samtools', 'view', '--region-file', zones_filename, '-@', str(available_threads),
+            '-N', qnames_filename, '-P', '-f', '0x800', '-h', '-o', supplementary_filename, input_filename]
+    if fasta_ref:
+        args.extend(['-T', fasta_ref])
+    subprocess.run(args, check=True)
+    logging.debug(f'Loaded supplementary reads for {input_filename} > {supplementary_filename}')
+
+    # Call samtools to write the reads (with only secondary 0x100 ) in the zones
+    secondary_filename = f'{output_prefix}.secondary{output_suffix}'
+    args = ['samtools', 'view', '--region-file', zones_filename, '-@', str(available_threads),
+            '-N', qnames_filename, '-P', '-f', '0x100', '-h', '-o', secondary_filename, input_filename]
+    if fasta_ref:
+        args.extend(['-T', fasta_ref])
+    subprocess.run(args, check=True)
+    logging.debug(f'Loaded secondary reads for {input_filename} > {secondary_filename}')
+
+    # Merge the supplementary and secondary reads into the main output file
+    args = ['samtools', 'merge', '-c', '-f', '-@', str(available_threads), output_filename,
+            primary_filename, supplementary_filename, secondary_filename]
+    subprocess.run(args, check=True)
+    logging.debug(f'Merged reads for {input_filename} > {output_filename}')
+
     os.remove(zones_filename)
+    os.remove(qnames_filename)
+    os.remove(primary_filename)
+    os.remove(supplementary_filename)
+    os.remove(secondary_filename)
 
 
 def _get_sam_header(file_obj, file_index, split_rg, rewrite_rg=True):
@@ -271,6 +309,7 @@ if __name__ == '__main__':
     parser.add_argument('--fasta-ref', '-f', type=str, help='Fasta reference file (used for CRAM files)')
     parser.add_argument('--split-read-groups', action='store_true',
                         help='Keep the read groups separate (they will be anonymized)')
+    parser.add_argument('--force', action='store_true', help='Force overwrite of output files')
 
     args = parser.parse_args()
 
@@ -347,7 +386,7 @@ if __name__ == '__main__':
             output_files_dict[file_index] = []
         output_files_dict[file_index].append(output_filename)
         # If the file already exists and is not empty, skip it
-        if os.path.isfile(output_filename) and os.path.getsize(output_filename) > 0:
+        if not args.force and os.path.isfile(output_filename) and os.path.getsize(output_filename) > 0:
             logging.debug(f'Skipping {filename} because {output_filename} already exists')
             continue
         task = pool.submit(_write_zones, file_zones, filename, output_filename, processes_per_file, args.fasta_ref)
