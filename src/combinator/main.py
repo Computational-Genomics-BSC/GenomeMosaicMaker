@@ -239,10 +239,6 @@ def _merge_files(temp_output_files, file_index, output_file, zones, num_processe
     # Close the temp output files
     [f.close() for f in temp_output_files_objs]
 
-    # Remove temp output files
-    for temp_output_file in temp_output_files:
-        os.remove(temp_output_file)
-
 
 def _read_vcf(vcf_file, padding):
     # Create the VariantExtractor object
@@ -395,5 +391,10 @@ if __name__ == '__main__':
     for task in tasks:
         task.result()
     pool.shutdown()
+
+    # Remove temporary files
+    for temp_output_files in output_files_dict.values():
+        for temp_output_file in temp_output_files:
+            os.remove(temp_output_file)
 
     logging.debug('Done')
