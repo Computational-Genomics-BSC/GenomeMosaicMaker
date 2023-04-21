@@ -105,6 +105,7 @@ def _write_zones(zones, input_filename, output_filename, available_threads, fast
             for zone in chrom_zones:
                 zones_file.write(f'{chrom}\t{zone[0]}\t{zone[1]}')
                 zones_file.write('\n')
+    del zones
 
     output_prefix = os.path.splitext(output_filename)[0]
     output_suffix = os.path.splitext(output_filename)[1]
@@ -118,41 +119,29 @@ def _write_zones(zones, input_filename, output_filename, available_threads, fast
     subprocess.run(args, check=True)
     logging.debug(f'Loaded primary reads for {input_filename} > {primary_filename}')
 
-    qnames_filename = f'{output_filename}.qnames.txt'
-    with pysam.AlignmentFile(primary_filename, 'r') as primary_file_obj:
-        with open(qnames_filename, 'w') as qnames_file:
-            for read in primary_file_obj.fetch(until_eof=True):
-                qnames_file.write(f'{read.query_name}\n')
+    qnames_set = set()
+    with pysam.AlignmentFile(primary_filename, 'r', threads=available_threads) as primary_file_obj:
+        for read in primary_file_obj.fetch(until_eof=True):
+            qnames_set.add(read.query_name)
 
-    # Call samtools to write the reads (with only supplementary 0x800) in the zones
-    supplementary_filename = f'{output_prefix}.supplementary{output_suffix}'
-    args = ['samtools', 'view', '--region-file', zones_filename, '-@', str(available_threads),
-            '-N', qnames_filename, '-P', '-f', '0x800', '-h', '-o', supplementary_filename, input_filename]
-    if fasta_ref:
-        args.extend(['-T', fasta_ref])
-    subprocess.run(args, check=True)
-    logging.debug(f'Loaded supplementary reads for {input_filename} > {supplementary_filename}')
-
-    # Call samtools to write the reads (with only secondary 0x100 ) in the zones
-    secondary_filename = f'{output_prefix}.secondary{output_suffix}'
-    args = ['samtools', 'view', '--region-file', zones_filename, '-@', str(available_threads),
-            '-N', qnames_filename, '-P', '-f', '0x100', '-h', '-o', secondary_filename, input_filename]
-    if fasta_ref:
-        args.extend(['-T', fasta_ref])
-    subprocess.run(args, check=True)
-    logging.debug(f'Loaded secondary reads for {input_filename} > {secondary_filename}')
+    # Read the whole file and write the secondary and supplementary reads in the zones
+    supplementary_filename = f'{output_prefix}.supplementary.secondary{output_suffix}'
+    with pysam.AlignmentFile(input_filename, 'r', threads=available_threads) as input_file_obj:
+        with pysam.AlignmentFile(supplementary_filename, 'w', threads=available_threads, header=input_file_obj.header) as supplementary_file_obj:
+            for read in input_file_obj.fetch(until_eof=True):
+                if (read.is_supplementary or read.is_secondary) and read.query_name in qnames_set:
+                    supplementary_file_obj.write(read)
+    logging.debug(f'Loaded secondary reads for {input_filename} > {supplementary_filename}')
 
     # Merge the supplementary and secondary reads into the main output file
     args = ['samtools', 'merge', '-c', '-f', '-@', str(available_threads), output_filename,
-            primary_filename, supplementary_filename, secondary_filename]
+            primary_filename, supplementary_filename]
     subprocess.run(args, check=True)
     logging.debug(f'Merged reads for {input_filename} > {output_filename}')
 
     os.remove(zones_filename)
-    os.remove(qnames_filename)
     os.remove(primary_filename)
     os.remove(supplementary_filename)
-    os.remove(secondary_filename)
 
 
 def _get_sam_header(file_obj, file_index, split_rg, rewrite_rg=True):
