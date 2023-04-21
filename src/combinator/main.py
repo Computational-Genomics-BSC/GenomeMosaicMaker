@@ -99,12 +99,7 @@ def _get_reads_generator(input_file_objs, ref_names_order):
 
 def _write_zones(zones, input_filename, output_filename, available_threads, fasta_ref=None):
     # Get reads in zones
-    inzone_reads = _get_reads_in_zones(input_filename, zones, available_threads, fasta_ref)
-    # Get qnames of reads in zones
-    qnames_set = set()
-    for read in inzone_reads:
-        qnames_set.add(read.query_name)
-    del inzone_reads
+    qnames_set = _get_reads_in_zones(input_filename, zones, available_threads, fasta_ref)
     del zones
 
     # Read the whole file and write the reads in the zones
