@@ -136,17 +136,7 @@ def _get_sam_header(file_obj, file_index, split_rg, rewrite_rg=True):
     return header
 
 
-def _open_output_file(output_file, headers, multithreading, fasta_ref):
-    # Get write mode based on the output file extension
-    if output_file.endswith('.bam'):
-        write_mode = 'wb'
-    elif output_file.endswith('.sam'):
-        write_mode = 'wh'
-    elif output_file.endswith('.cram'):
-        write_mode = 'wc'
-    else:
-        raise Exception('Invalid output file extension')
-
+def _open_output_file(output_file, headers, num_processes, fasta_ref):
     # Combine the RG from the headers
     new_header = headers[0]
     read_group_dict = {}
@@ -155,17 +145,17 @@ def _open_output_file(output_file, headers, multithreading, fasta_ref):
             read_group_dict[rg['ID']] = rg
     new_header['RG'] = list(read_group_dict.values())
     # Open the output file
-    return pysam.AlignmentFile(output_file, write_mode, header=new_header, threads=2 if multithreading else 1, reference_filename=fasta_ref)
+    return pysam.AlignmentFile(output_file, 'w', header=new_header, threads=num_processes, reference_filename=fasta_ref)
 
 
-def _merge_files(temp_output_files, file_index, output_file, zones, num_processes, multithreading, fasta_ref, split_rg, infill_file=None):
-    temp_output_files_objs = [pysam.AlignmentFile(f, threads=2 if multithreading else 1,
-                                                  reference_filename=fasta_ref) for f in temp_output_files]
+def _merge_files(temp_output_files, file_index, output_file, zones, num_processes, fasta_ref, split_rg, infill_file=None):
+    temp_output_files_objs = [pysam.AlignmentFile(f, reference_filename=fasta_ref, threads=num_processes)
+                              for f in temp_output_files]
     template_headers = [_get_sam_header(f_obj, file_index, split_rg, rewrite_rg=True) for f_obj in temp_output_files_objs] + \
         ([_get_sam_header(pysam.AlignmentFile(infill_file, reference_filename=fasta_ref), file_index, split_rg, rewrite_rg=True)]
          if infill_file is not None else [])
     # Open the output file
-    output_file_obj = _open_output_file(output_file, template_headers, multithreading, fasta_ref)
+    output_file_obj = _open_output_file(output_file, template_headers, num_processes, fasta_ref)
     # Get reference names order
     ref_names_order = dict()
     for idx, ref_name in enumerate(output_file_obj.references):
@@ -178,8 +168,7 @@ def _merge_files(temp_output_files, file_index, output_file, zones, num_processe
         # Get the reads from the infill file that are in the zones
         inzone_reads = _get_reads_in_zones(infill_file, zones, num_processes, fasta_ref)
         # Open the infill file
-        infill_file_obj = pysam.AlignmentFile(
-            infill_file, threads=2 if multithreading else 1, reference_filename=fasta_ref)
+        infill_file_obj = pysam.AlignmentFile(infill_file, threads=num_processes, reference_filename=fasta_ref)
         # Write the reads from the infill file
         for infill_read in infill_file_obj.fetch(until_eof=True):
             # Write the output reads until we reach the infill read
@@ -256,8 +245,6 @@ if __name__ == '__main__':
     parser.add_argument('--padding', '-p', type=int, default=1000, help='Padding around the variants')
     parser.add_argument('--maximum-processes', '-mp', type=int, default=1,
                         help='Maximum number of physical processes to use')
-    parser.add_argument('--multithreading', '-t', action='store_true',
-                        help='Use multithreading (2 threads per process)')
     parser.add_argument('--fasta-ref', '-f', type=str, help='Fasta reference file (used for CRAM files)')
     parser.add_argument('--split-read-groups', action='store_true',
                         help='Keep the read groups separate (they will be anonymized)')
@@ -352,8 +339,8 @@ if __name__ == '__main__':
     for file_index, temp_output_files in output_files_dict.items():
         logging.debug(f'Merging {len(temp_output_files)} files into {args.outputs[file_index]}')
         infill_file = None if args.infill_files is None else args.infill_files[file_index]
-        task = pool.submit(_merge_files, temp_output_files, file_index, args.outputs[file_index],
-                           zones, processes_per_file, args.multithreading, args.fasta_ref, args.split_read_groups, infill_file)
+        task = pool.submit(_merge_files, temp_output_files, file_index,
+                           args.outputs[file_index], zones, processes_per_file, args.fasta_ref, args.split_read_groups, infill_file)
         tasks.append(task)
     for task in tasks:
         task.result()
