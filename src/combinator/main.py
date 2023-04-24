@@ -104,7 +104,7 @@ def _write_zones(zones, input_filename, output_filename, available_threads, fast
 
     # Read the whole file and write the reads in the zones
     with pysam.AlignmentFile(input_filename, 'r', threads=available_threads, reference_filename=fasta_ref) as input_file_obj:
-        with pysam.AlignmentFile(output_filename, 'w', threads=available_threads, header=input_file_obj.header, reference_filename=fasta_ref) as output_file_obj:
+        with _open_output_file(output_filename, [input_file_obj.header.to_dict()], available_threads, fasta_ref) as output_file_obj:
             for read in input_file_obj.fetch(until_eof=True):
                 if read.query_name in qnames_set:
                     output_file_obj.write(read)
@@ -136,7 +136,17 @@ def _get_sam_header(file_obj, file_index, split_rg, rewrite_rg=True):
     return header
 
 
-def _open_output_file(output_file, headers, num_processes, fasta_ref):
+def _open_output_file(output_file, headers, num_threads, fasta_ref):
+    # Get write mode based on the output file extension
+    if output_file.endswith('.bam'):
+        write_mode = 'wb'
+    elif output_file.endswith('.sam'):
+        write_mode = 'wh'
+    elif output_file.endswith('.cram'):
+        write_mode = 'wc'
+    else:
+        raise Exception('Invalid output file extension')
+
     # Combine the RG from the headers
     new_header = headers[0]
     read_group_dict = {}
@@ -145,7 +155,7 @@ def _open_output_file(output_file, headers, num_processes, fasta_ref):
             read_group_dict[rg['ID']] = rg
     new_header['RG'] = list(read_group_dict.values())
     # Open the output file
-    return pysam.AlignmentFile(output_file, 'w', header=new_header, threads=num_processes, reference_filename=fasta_ref)
+    return pysam.AlignmentFile(output_file, write_mode, header=new_header, threads=num_threads, reference_filename=fasta_ref)
 
 
 def _merge_files(temp_output_files, file_index, output_file, zones, num_processes, fasta_ref, split_rg, infill_file=None):
