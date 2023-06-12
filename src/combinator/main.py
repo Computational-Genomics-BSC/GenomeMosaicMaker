@@ -182,7 +182,7 @@ def _merge_files(temp_output_files, file_index, output_file, zones, num_processe
         # Write the reads from the infill file
         for infill_read in infill_file_obj.fetch(until_eof=True):
             # Skip reads that are not in the original reference
-            if infill_read.reference_name not in ref_names_order or infill_file.next_reference_name not in ref_names_order:
+            if infill_read.reference_name not in ref_names_order or infill_read.next_reference_name not in ref_names_order:
                 continue
             # Write the output reads until we reach the infill read
             while output_read is not None and \
