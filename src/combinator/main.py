@@ -5,12 +5,11 @@
 import os
 import sys
 import argparse
-import pysam
-import subprocess
 import bisect
 import hashlib
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 import logging
+import pysam
 
 
 from variant_extractor import VariantExtractor
@@ -170,6 +169,7 @@ def _merge_files(temp_output_files, file_index, output_file, zones, num_processe
     ref_names_order = dict()
     for idx, ref_name in enumerate(output_file_obj.references):
         ref_names_order[ref_name] = idx
+    ref_names_order['*'] = len(ref_names_order)
     # Get generator of reads from the temp output files
     output_reads_generator = _get_reads_generator(temp_output_files_objs, ref_names_order)
     # Get the first read from the generator
@@ -181,10 +181,12 @@ def _merge_files(temp_output_files, file_index, output_file, zones, num_processe
         infill_file_obj = pysam.AlignmentFile(infill_file, threads=num_processes, reference_filename=fasta_ref)
         # Write the reads from the infill file
         for infill_read in infill_file_obj.fetch(until_eof=True):
+            # Skip reads that are not in the original reference
+            if infill_read.reference_name not in ref_names_order or infill_file.next_reference_name not in ref_names_order:
+                continue
             # Write the output reads until we reach the infill read
             while output_read is not None and \
-                (infill_read.reference_name not in ref_names_order or
-                 ref_names_order[output_read.reference_name] < ref_names_order[infill_read.reference_name] or
+                (ref_names_order[output_read.reference_name] < ref_names_order[infill_read.reference_name] or
                  (output_read.reference_name == infill_read.reference_name and output_read.reference_start < infill_read.reference_start)):
                 _write_read(output_file_obj, output_read, infill_file, split_rg)
                 output_read = next(output_reads_generator)
@@ -203,7 +205,7 @@ def _merge_files(temp_output_files, file_index, output_file, zones, num_processe
     # Close the output file
     output_file_obj.close()
     # Close the temp output files
-    [f.close() for f in temp_output_files_objs]
+    _ = [f.close() for f in temp_output_files_objs]
 
 
 def _read_vcf(vcf_file, padding):
