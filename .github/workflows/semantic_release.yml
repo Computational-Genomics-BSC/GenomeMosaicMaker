@@ -82,6 +82,8 @@ jobs:
         run: |
             recipe=singularity.def
             basename=${{ github.event.repository.name }}
+            # Lowercase basename
+            basename=$(echo $basename | tr '[:upper:]' '[:lower:]')
             tag=${{ needs.release.outputs.version }}
             # Check if container exists
             base64token=$(echo ${{ secrets.GITHUB_TOKEN }} | base64)
