@@ -157,12 +157,12 @@ def _open_output_file(output_file, headers, num_threads, fasta_ref):
     return pysam.AlignmentFile(output_file, write_mode, header=new_header, threads=num_threads, reference_filename=fasta_ref)
 
 
-def _merge_files(temp_output_files, file_index, output_file, zones, num_processes, fasta_ref, split_rg, infill_file=None):
+def _merge_files(temp_output_files, file_index, output_file, zones, num_processes, fasta_ref, split_rg, canvas_file=None):
     temp_output_files_objs = [pysam.AlignmentFile(f, reference_filename=fasta_ref, threads=num_processes)
                               for f in temp_output_files]
     template_headers = [_get_sam_header(f_obj, file_index, split_rg, rewrite_rg=True) for f_obj in temp_output_files_objs] + \
-        ([_get_sam_header(pysam.AlignmentFile(infill_file, reference_filename=fasta_ref), file_index, split_rg, rewrite_rg=True)]
-         if infill_file is not None else [])
+        ([_get_sam_header(pysam.AlignmentFile(canvas_file, reference_filename=fasta_ref), file_index, split_rg, rewrite_rg=True)]
+         if canvas_file is not None else [])
     # Open the output file
     output_file_obj = _open_output_file(output_file, template_headers, num_processes, fasta_ref)
     # Get reference names order
@@ -174,32 +174,32 @@ def _merge_files(temp_output_files, file_index, output_file, zones, num_processe
     output_reads_generator = _get_reads_generator(temp_output_files_objs, ref_names_order)
     # Get the first read from the generator
     output_read = next(output_reads_generator)
-    if infill_file is not None:
-        # Get the reads from the infill file that are in the zones
-        inzone_reads = _get_reads_in_zones(infill_file, zones, num_processes, fasta_ref)
-        # Open the infill file
-        infill_file_obj = pysam.AlignmentFile(infill_file, threads=num_processes, reference_filename=fasta_ref)
-        # Write the reads from the infill file
-        for infill_read in infill_file_obj.fetch(until_eof=True):
+    if canvas_file is not None:
+        # Get the reads from the canvas file that are in the zones
+        inzone_reads = _get_reads_in_zones(canvas_file, zones, num_processes, fasta_ref)
+        # Open the canvas file
+        canvas_file_obj = pysam.AlignmentFile(canvas_file, threads=num_processes, reference_filename=fasta_ref)
+        # Write the reads from the canvas file
+        for canvas_read in canvas_file_obj.fetch(until_eof=True):
             # Skip reads that are not in the original reference
-            if infill_read.reference_name not in ref_names_order or infill_read.next_reference_name not in ref_names_order:
+            if canvas_read.reference_name not in ref_names_order or canvas_read.next_reference_name not in ref_names_order:
                 continue
-            # Write the output reads until we reach the infill read
+            # Write the output reads until we reach the canvas read
             while output_read is not None and \
-                (ref_names_order[output_read.reference_name] < ref_names_order[infill_read.reference_name] or
-                 (output_read.reference_name == infill_read.reference_name and output_read.reference_start < infill_read.reference_start)):
-                _write_read(output_file_obj, output_read, infill_file, split_rg)
+                (ref_names_order[output_read.reference_name] < ref_names_order[canvas_read.reference_name] or
+                 (output_read.reference_name == canvas_read.reference_name and output_read.reference_start < canvas_read.reference_start)):
+                _write_read(output_file_obj, output_read, canvas_file, split_rg)
                 output_read = next(output_reads_generator)
-            # Avoid writing the infill read if it is in a zone
-            if infill_read.query_name in inzone_reads:
+            # Avoid writing the canvas read if it is in a zone
+            if canvas_read.query_name in inzone_reads:
                 continue
-            # Write the infill read
-            _write_read(output_file_obj, infill_read, infill_file, split_rg)
-        # Close the infill file
-        infill_file_obj.close()
+            # Write the canvas read
+            _write_read(output_file_obj, canvas_read, canvas_file, split_rg)
+        # Close the canvas file
+        canvas_file_obj.close()
     # Write the remaining output reads
     while output_read is not None:
-        _write_read(output_file_obj, output_read, infill_file, split_rg)
+        _write_read(output_file_obj, output_read, canvas_file, split_rg)
         output_read = next(output_reads_generator)
 
     # Close the output file
@@ -253,7 +253,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--input', '-i', required=True, help='Input VCF file')
     parser.add_argument('--outputs', '-o', required=True, nargs='+', help='Output alignment files')
-    parser.add_argument('--infill-files', '-if', nargs='+', help='Infill alignment files')
+    parser.add_argument('--canvas-files', '-if', nargs='+', help='canvas alignment files')
     parser.add_argument('--padding', '-p', type=int, default=1000, help='Padding around the variants')
     parser.add_argument('--maximum-processes', '-mp', type=int, default=1,
                         help='Maximum number of physical processes to use')
@@ -270,19 +270,19 @@ if __name__ == '__main__':
     args.input = os.path.abspath(args.input)
     args.outputs = [os.path.abspath(output) for output in args.outputs]
 
-    if args.infill_files is not None:
-        args.infill_files = [os.path.abspath(infill_file) for infill_file in args.infill_files]
-        # Make sure the same number of infill files and output files are provided
-        if len(args.infill_files) != len(args.outputs):
-            raise Exception('The same number of infill files and output files must be provided')
-        # Make sure the infill files and output files are not the same
-        for infill_file, output_file in zip(args.infill_files, args.outputs):
-            if infill_file == output_file:
-                raise Exception('The infill files and output files must be different')
-        # Make sure the infill files exist and are not empty
-        for infill_file in args.infill_files:
-            if not os.path.isfile(infill_file) or os.path.getsize(infill_file) == 0:
-                raise Exception(f'The infill file {infill_file} does not exist or is empty')
+    if args.canvas_files is not None:
+        args.canvas_files = [os.path.abspath(canvas_file) for canvas_file in args.canvas_files]
+        # Make sure the same number of canvas files and output files are provided
+        if len(args.canvas_files) != len(args.outputs):
+            raise Exception('The same number of canvas files and output files must be provided')
+        # Make sure the canvas files and output files are not the same
+        for canvas_file, output_file in zip(args.canvas_files, args.outputs):
+            if canvas_file == output_file:
+                raise Exception('The canvas files and output files must be different')
+        # Make sure the canvas files exist and are not empty
+        for canvas_file in args.canvas_files:
+            if not os.path.isfile(canvas_file) or os.path.getsize(canvas_file) == 0:
+                raise Exception(f'The canvas file {canvas_file} does not exist or is empty')
 
     zones = _read_vcf(args.input, args.padding)
 
@@ -350,9 +350,9 @@ if __name__ == '__main__':
     tasks = []
     for file_index, temp_output_files in output_files_dict.items():
         logging.debug(f'Merging {len(temp_output_files)} files into {args.outputs[file_index]}')
-        infill_file = None if args.infill_files is None else args.infill_files[file_index]
+        canvas_file = None if args.canvas_files is None else args.canvas_files[file_index]
         task = pool.submit(_merge_files, temp_output_files, file_index,
-                           args.outputs[file_index], zones, processes_per_file, args.fasta_ref, args.split_read_groups, infill_file)
+                           args.outputs[file_index], zones, processes_per_file, args.fasta_ref, args.split_read_groups, canvas_file)
         tasks.append(task)
     for task in tasks:
         task.result()

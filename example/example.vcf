@@ -1,0 +1,5 @@
+##fileformat=VCFv4.2
+##FILTER=<ID=PASS,Description="All filters passed">
+##INFO=<ID=VAF,Number=1,Type=Float,Description="VAF">
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO
+1	1703778	.	T	]1:1739774]T	200	PASS	FILES=/absolute/path/to/original/normal.bam,/absolute/path/to/original/tumor.bam

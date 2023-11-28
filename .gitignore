@@ -152,5 +152,4 @@ cython_debug/
 #.idea/
 
 test_data/
-logs/
-test_command.sh
+mn4_scripts/
