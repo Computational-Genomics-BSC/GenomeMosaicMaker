@@ -2,6 +2,15 @@
 
 
 
+## v1.0.0 (2023-11-28)
+
+### Breaking
+
+* fix: Dummy commit
+
+BREAKING CHANGE: Dummy commit for release ([`7ca1f0d`](https://github.com/Computational-Genomics-BSC/GenomeMosaicMaker/commit/7ca1f0d5a9b4dda3e5f87df0ba28007787dfbb69))
+
+
 ## v0.1.0 (2023-11-28)
 
 ### Feature
