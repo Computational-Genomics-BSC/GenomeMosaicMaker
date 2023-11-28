@@ -1,17 +1,14 @@
-WARNING Singularity doesn't support expansion, * found in src/*
-WARNING src/* doesn't exist, ensure exists for build
 Bootstrap: docker
 From: ubuntu:20.04
 Stage: spython-base
 
 %files
-src/* /genome-mosaic-maker/
+src/ /genome-mosaic-maker/
 %labels
 author="Rodrigo Martin <rodrigo.martin@bsc.es>"
 %post
 
-PATH=$PATH:$HOME/bin
-DEBIAN_FRONTEND=noninteractive
+export DEBIAN_FRONTEND=noninteractive
 
 # Install dependencies
 apt-get update && apt-get upgrade -y && apt-get install -y \
@@ -22,7 +19,6 @@ libz-dev \
 libglib2.0-dev \
 libbz2-dev \
 liblzma-dev \
-default-jre \
 autoconf \
 samtools
 
@@ -31,8 +27,6 @@ pip install pysam variant-extractor
 
 
 # Copy scripts from src
-%environment
-export PATH=$PATH:$HOME/bin
 %runscript
 exec /bin/bash "$@"
 %startscript

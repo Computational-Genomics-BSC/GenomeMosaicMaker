@@ -46,10 +46,10 @@ docker build -t genome-mosaic-maker .
 
 ## Usage
 
-GenomeMosaicMaker is a command-line tool. The process for building a mosaic genome (with a normal and tumor sample) is as follows:
+GenomeMosaicMaker is a command-line tool. Assuming you have a singularity image called `genome-mosaic-maker.sif`, the process for building a mosaic genome (with a normal and tumor sample) is as follows:
 
 ```
-python3 -O ../src/combinator/main.py -mp 32 -p 1000 -i input.vcf -if canvas_N.cram canvas_T.cram -o example_out_N.bam example_out_T.bam
+singularity exec genome-mosaic-maker.sif python3 -O ../src/combinator/main.py -mp 32 -p 1000 -i input.vcf -if canvas_N.cram canvas_T.cram -o example_out_N.bam example_out_T.bam
 ```
 
 The input VCF/BCF/VCF.GZ file must have a field named `FILES` in the `INFO` column. This field must contain the paths to the BAM/CRAM/SAM files that will be used to extract the reads. The paths must be separated by a comma (`,`). The number of files must match the number of input canvas files and the order must be the same. The BAM/CRAM/SAM files must be indexed. Check the [example](example/) folder for an example of how to prepare the input VCF.

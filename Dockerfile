@@ -1,8 +1,7 @@
 FROM ubuntu:20.04
 LABEL author="Rodrigo Martin <rodrigo.martin@bsc.es>"
 
-ENV PATH=$PATH:$HOME/bin
-ARG DEBIAN_FRONTEND=noninteractive
+RUN export DEBIAN_FRONTEND=noninteractive
 
 # Install dependencies
 RUN apt-get update && apt-get upgrade -y && apt-get install -y \
@@ -13,7 +12,6 @@ RUN apt-get update && apt-get upgrade -y && apt-get install -y \
     libglib2.0-dev \
     libbz2-dev \
     liblzma-dev \
-    default-jre \
     autoconf \
     samtools
 
@@ -22,4 +20,4 @@ RUN pip install pysam variant-extractor
 
 
 # Copy scripts from src
-COPY src/* /genome-mosaic-maker/
+COPY src/ /genome-mosaic-maker/
