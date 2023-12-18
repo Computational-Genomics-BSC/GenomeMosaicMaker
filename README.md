@@ -4,7 +4,7 @@ GenomeMosaicMaker is a tool for for copying read-alignments regions centered aro
 
 Existing validated datasets tend to be large and require computationally intensive processing due to the inclusion of numerous samples, even when they contain few validated variants. Mosaic genomes significantly reduce benchmarking efforts, while retaining the intrinsic noise and read sequencing representation of the original samples, and therefore also of their assessment properties. The tool is written in Python.
 
-GenomeMosaicMaker is framed under EUCANCan’s (EUropean-CANadian Cancer network) second work package and is used to complement the benchmarking datasets of ONCOLINER. The generation workflow is provided as a standalone Python script with a command-line interface and is optimized for running in a HPC environment, more precisely in MareNostrum 4.
+GenomeMosaicMaker is framed under EUCANCan’s (EUropean-CANadian Cancer network) second work package and is used to complement the benchmarking datasets of ONCOLINER. The generation workflow is provided as a standalone Python script with a command-line interface and is optimized for running in a multi-core environment, more precisely in a single node of MareNostrum 4.
 
 ![oncoliner_mosaic](docs/images/oncoliner_mosaic.png)
 
