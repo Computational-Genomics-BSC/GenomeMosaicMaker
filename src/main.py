@@ -97,6 +97,10 @@ def _get_reads_generator(input_file_objs, ref_names_order):
 
 
 def _write_zones(zones, input_filename, output_filename, available_threads, fasta_ref=None):
+    # If .done file exists, skip
+    if os.path.isfile(f'{output_filename}.done'):
+        logging.info(f'Skipping {input_filename} > {output_filename}')
+        return
     # Get reads in zones
     qnames_set = _get_reads_in_zones(input_filename, zones, available_threads, fasta_ref)
     del zones
@@ -108,6 +112,9 @@ def _write_zones(zones, input_filename, output_filename, available_threads, fast
                 if read.query_name in qnames_set:
                     output_file_obj.write(read)
     logging.debug(f'Loaded reads for {input_filename} > {output_filename}')
+    # Write .done file to indicate that the file has been processed
+    with open(f'{output_filename}.done', 'w') as done_file:
+        done_file.write('')
 
 
 def _get_sam_header(file_obj, file_index, split_rg, rewrite_rg=True):
@@ -260,7 +267,6 @@ if __name__ == '__main__':
     parser.add_argument('--fasta-ref', '-f', type=str, help='Fasta reference file (used for CRAM files)')
     parser.add_argument('--split-read-groups', action='store_true',
                         help='Keep the read groups separate (they will be anonymized)')
-    parser.add_argument('--force', action='store_true', help='Force overwrite of output files')
 
     args = parser.parse_args()
 
@@ -310,6 +316,14 @@ if __name__ == '__main__':
 
     logging.debug('Successfully checked for overlapping zones')
 
+    # Create a BED file with the zones
+    output_bed = args.outputs[0] + '_zones.bed'
+    with open(output_bed, 'w') as bed_file:
+        for chrom, chrom_zones in zones.items():
+            for zone in chrom_zones:
+                bed_file.write(f'{chrom}\t{zone[0]}\t{zone[1]}\n')
+    logging.debug(f'Wrote zones to {output_bed}')
+
     # Group zones by input file
     files_indexes = dict()
     zones_by_file = dict()
@@ -336,10 +350,6 @@ if __name__ == '__main__':
         if file_index not in output_files_dict:
             output_files_dict[file_index] = []
         output_files_dict[file_index].append(output_filename)
-        # If the file already exists and is not empty, skip it
-        if not args.force and os.path.isfile(output_filename) and os.path.getsize(output_filename) > 0:
-            logging.debug(f'Skipping {filename} because {output_filename} already exists')
-            continue
         task = pool.submit(_write_zones, file_zones, filename, output_filename, processes_per_file, args.fasta_ref)
         tasks.append(task)
     for task in tasks:
@@ -362,5 +372,7 @@ if __name__ == '__main__':
     for temp_output_files in output_files_dict.values():
         for temp_output_file in temp_output_files:
             os.remove(temp_output_file)
+            # Remove .done file
+            os.remove(f'{temp_output_file}.done')
 
     logging.debug('Done')

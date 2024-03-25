@@ -60,7 +60,7 @@ The input VCF/BCF/VCF.GZ file must have a field named `FILES` in the `INFO` colu
 usage: main.py [-h] --input INPUT --outputs OUTPUTS [OUTPUTS ...]
                [--canvas-files CANVAS_FILES [CANVAS_FILES ...]]
                [--padding PADDING] [--maximum-processes MAXIMUM_PROCESSES]
-               [--fasta-ref FASTA_REF] [--split-read-groups] [--force]
+               [--fasta-ref FASTA_REF] [--split-read-groups]
 
 optional arguments:
   -h, --help            show this help message and exit
@@ -78,7 +78,6 @@ optional arguments:
                         Fasta reference file (used for CRAM files)
   --split-read-groups   Keep the read groups separate (they will be
                         anonymized)
-  --force               Force overwrite of output files
 ```
 
 
