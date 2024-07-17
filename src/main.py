@@ -256,6 +256,14 @@ def _read_vcf(vcf_file, padding):
     return zones
 
 
+def write_zones_bed_file(zones, output_bed, extra_padding=0):
+    output_bed = args.outputs[0] + '_zones.bed'
+    with open(output_bed, 'w') as bed_file:
+        for chrom, chrom_zones in zones.items():
+            for zone in chrom_zones:
+                bed_file.write(f'{chrom}\t{max(0, zone[0] - extra_padding)}\t{zone[1] + extra_padding}\n')
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--input', '-i', required=True, help='Input VCF file')
@@ -318,10 +326,7 @@ if __name__ == '__main__':
 
     # Create a BED file with the zones
     output_bed = args.outputs[0] + '_zones.bed'
-    with open(output_bed, 'w') as bed_file:
-        for chrom, chrom_zones in zones.items():
-            for zone in chrom_zones:
-                bed_file.write(f'{chrom}\t{zone[0]}\t{zone[1]}\n')
+    write_zones_bed_file(zones, output_bed, args.padding)
     logging.debug(f'Wrote zones to {output_bed}')
 
     # Group zones by input file
