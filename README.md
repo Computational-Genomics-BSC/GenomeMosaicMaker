@@ -1,5 +1,7 @@
 # GenomeMosaicMaker<!-- omit in toc -->
 
+[![DOI](https://zenodo.org/badge/724682461.svg)](https://zenodo.org/doi/10.5281/zenodo.12755101)
+
 GenomeMosaicMaker is a tool for for copying read-alignments regions centered around variants (in VCF/VCF.GZ/BCF format) from existing genomes (in SAM/BAM/CRAM format) to insert them into canvas genomes (in SAM/BAM/CRAM format) to generate mosaic genomes. 
 
 Existing validated datasets tend to be large and require computationally intensive processing due to the inclusion of numerous samples, even when they contain few validated variants. Mosaic genomes significantly reduce benchmarking efforts, while retaining the intrinsic noise and read sequencing representation of the original samples, and therefore also of their assessment properties. The tool is written in Python.
