@@ -1,6 +1,14 @@
 # CHANGELOG
 
+## v1.1.0 (2024-07-17)
 
+### Feature
+
+* feat: Output BED file with the zones ([`fbaad17`](https://github.com/Computational-Genomics-BSC/GenomeMosaicMaker/commit/fbaad17bd4f457e18fb9eb0d63820360394bfcc6))
+
+### Fix
+
+* fix: Add padding to the windows in the BED file ([`e1151ec`](https://github.com/Computational-Genomics-BSC/GenomeMosaicMaker/commit/e1151ec4b4bdca5e02f1c621c55644efb79e0666))
 
 ## v1.0.0 (2023-11-28)
 
@@ -9,7 +17,6 @@
 * fix: Dummy commit
 
 BREAKING CHANGE: Dummy commit for release ([`7ca1f0d`](https://github.com/Computational-Genomics-BSC/GenomeMosaicMaker/commit/7ca1f0d5a9b4dda3e5f87df0ba28007787dfbb69))
-
 
 ## v0.1.0 (2023-11-28)
 
