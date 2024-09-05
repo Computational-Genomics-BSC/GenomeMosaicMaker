@@ -1,5 +1,11 @@
 # CHANGELOG
 
+## v1.1.1 (2024-09-05)
+
+### Fix
+
+* fix: Fix docker compatibility ([`d35511a`](https://github.com/Computational-Genomics-BSC/GenomeMosaicMaker/commit/d35511a2fa929a43acd34775f1f79ce45f3802ea))
+
 ## v1.1.0 (2024-07-17)
 
 ### Feature
