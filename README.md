@@ -25,7 +25,7 @@ GenomeMosaicMaker is framed under EUCANCan’s (EUropean-CANadian Cancer network
 We recommend using [`singularity-ce`](https://github.com/sylabs/singularity) with a version higher than 3.9.0. You can download the Singularity container using the following command (does not require root privileges):
 
 ```
-singularity pull genome-mosaic-maker.sif oras://ghcr.io/computational-genomics-bsc/genomemosaicmaker:latest
+singularity pull genome-mosaic-maker.sif docker://ghcr.io/computational-genomics-bsc/genomemosaicmaker:latest
 ```
 
 If you want to build the container yourself, you can use the [`singularity.def`](singularity.def) file (requires root privileges):
