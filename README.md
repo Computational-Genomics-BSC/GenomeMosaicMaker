@@ -2,6 +2,8 @@
 
 [![DOI](https://zenodo.org/badge/724682461.svg)](https://zenodo.org/doi/10.5281/zenodo.12755101)
 
+R. Martín et al., “ONCOLINER: A new solution for monitoring, improving, and harmonizing somatic variant calling across genomic oncology centers,” _Cell Genomics_, vol. 4, no. 9. Elsevier BV, p. 100639, Sep. 2024. [doi: 10.1016/j.xgen.2024.100639](https://doi.org/10.1016/j.xgen.2024.100639)
+
 GenomeMosaicMaker is a tool for for copying read-alignments regions centered around variants (in VCF/VCF.GZ/BCF format) from existing genomes (in SAM/BAM/CRAM format) to insert them into canvas genomes (in SAM/BAM/CRAM format) to generate mosaic genomes. 
 
 Existing validated datasets tend to be large and require computationally intensive processing due to the inclusion of numerous samples, even when they contain few validated variants. Mosaic genomes significantly reduce benchmarking efforts, while retaining the intrinsic noise and read sequencing representation of the original samples, and therefore also of their assessment properties. The tool is written in Python.
